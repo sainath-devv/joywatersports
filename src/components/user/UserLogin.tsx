@@ -104,15 +104,15 @@ export default function UserLogin({ onSuccess, onCancel, isModal = false }: User
       let data: any = {};
       const text = await res.text();
       try {
-        data = JSON.parse(text);
+        data = text ? JSON.parse(text) : {};
       } catch (err) {
-        if (!res.ok) {
-          throw new Error(`Server error (${res.status}). Please check API backend deployment.`);
-        }
         if (text && text.trim().startsWith('<')) {
-          throw new Error('Server returned HTML instead of JSON. Ensure Vercel serverless build is active.');
+          throw new Error('Server returned HTML instead of JSON. Ensure Vercel serverless functions are configured correctly.');
         }
-        throw new Error('Server returned an invalid response. Please check server logs and try again.');
+        if (!res.ok) {
+          throw new Error(`Server request failed with status ${res.status}.`);
+        }
+        throw new Error('Server returned an unparseable response. Please try again.');
       }
 
       if (!res.ok) {
