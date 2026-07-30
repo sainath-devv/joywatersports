@@ -578,8 +578,57 @@ async function retryFailedSheetSyncs() {
 }
 
 // ========================================
-// DATABASE CONNECTION
+// DATABASE CONNECTION & SCHEMA ENSURE HELPERS
 // ========================================
+
+async function ensureUsersTable(p: any) {
+  if (!p) return;
+  try {
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        phone VARCHAR(255),
+        first_name VARCHAR(255),
+        last_name VARCHAR(255),
+        emergency_contact_encrypted TEXT,
+        is_legacy_auth BOOLEAN DEFAULT FALSE,
+        last_login_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS emergency_contact_encrypted TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_legacy_auth BOOLEAN DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+    `);
+  } catch (e: any) {
+    console.warn('ensureUsersTable warning:', e?.message || e);
+  }
+}
+
+async function ensureRefreshTokensTable(p: any) {
+  if (!p) return;
+  try {
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id VARCHAR(255) NOT NULL,
+        token_hash VARCHAR(64) NOT NULL UNIQUE,
+        device_info TEXT,
+        ip_address TEXT,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TIMESTAMP WITH TIME ZONE,
+        replaced_by_token VARCHAR(64)
+      );
+      ALTER TABLE refresh_tokens ALTER COLUMN ip_address TYPE TEXT;
+    `);
+  } catch (e: any) {
+    console.warn('ensureRefreshTokensTable warning:', e?.message || e);
+  }
+}
 
 async function initDatabase() {
   let dbUrl = process.env.DATABASE_URL?.trim();
@@ -1779,72 +1828,37 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
   // Helper to issue access & refresh tokens with DB session tracking in NeonDB
   const issueAuthTokens = async (req: any, res: any, user: { id: string; email: string }) => {
+    const userIdStr = String(user.id);
     const accessToken = jwt.sign(
-      { userId: user.id, email: user.email, type: 'access' },
+      { userId: userIdStr, email: user.email, type: 'access' },
       JWT_SECRET,
       { expiresIn: '15m' } // Short-lived 15 min access token
     );
 
     const refreshToken = jwt.sign(
-      { userId: user.id, email: user.email, type: 'refresh', jti: crypto.randomUUID() },
+      { userId: userIdStr, email: user.email, type: 'refresh', jti: crypto.randomUUID() },
       JWT_SECRET,
       { expiresIn: '7d' } // 7-day refresh token rotation
     );
 
     const tokenHash = hashToken(refreshToken);
-    const deviceInfo = req.headers['user-agent'] || 'Unknown Device';
+    const deviceInfo = (req.headers['user-agent'] || 'Unknown Device').toString();
     const rawIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString();
-    // Extract first IP in multi-proxy chain & fallback safely
     const ipAddress = rawIp ? rawIp.split(',')[0].trim() : 'Unknown';
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     // Track session token in NeonDB if database connection active
     if (pool) {
       try {
+        await ensureRefreshTokensTable(pool);
         await pool.query(
           `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at) 
-           VALUES ($1, $2, $3, $4, $5)`,
-          [user.id, tokenHash, deviceInfo, ipAddress, expiresAt]
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (token_hash) DO NOTHING`,
+          [userIdStr, tokenHash, deviceInfo, ipAddress, expiresAt]
         );
       } catch (dbErr: any) {
-        if (dbErr?.code === '42P01' || dbErr?.message?.includes('does not exist')) {
-          try {
-            await pool.query(`
-              CREATE TABLE IF NOT EXISTS refresh_tokens (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id VARCHAR(255) NOT NULL,
-                token_hash VARCHAR(64) NOT NULL UNIQUE,
-                device_info TEXT,
-                ip_address TEXT,
-                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                revoked_at TIMESTAMP WITH TIME ZONE,
-                replaced_by_token VARCHAR(64)
-              );
-            `);
-            await pool.query(
-              `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at) 
-               VALUES ($1, $2, $3, $4, $5)`,
-              [user.id, tokenHash, deviceInfo, ipAddress, expiresAt]
-            );
-          } catch (retryErr) {
-            console.warn('Refresh token DB table auto-creation warning:', retryErr);
-          }
-        } else if (dbErr?.code === '22001' || dbErr?.message?.includes('value too long') || dbErr?.message?.includes('varying(45)')) {
-          try {
-            console.warn('⚠️ Auto-migrating refresh_tokens.ip_address to TEXT column type...');
-            await pool.query('ALTER TABLE refresh_tokens ALTER COLUMN ip_address TYPE TEXT;');
-            await pool.query(
-              `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at) 
-               VALUES ($1, $2, $3, $4, $5)`,
-              [user.id, tokenHash, deviceInfo, ipAddress, expiresAt]
-            );
-          } catch (alterErr) {
-            console.warn('Failed to insert refresh token after ALTER COLUMN:', alterErr);
-          }
-        } else {
-          console.warn('Refresh token DB recording warning:', dbErr);
-        }
+        console.warn('Refresh token DB recording warning:', dbErr?.message || dbErr);
       }
     }
 
@@ -1902,62 +1916,59 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       // 3. Encrypt Sensitive Fields at Rest (e.g., Emergency Contact)
       const encryptedEmergencyContact = emergencyContact ? encryptSensitiveData(emergencyContact) : '';
 
-      let user;
+      let user: any = null;
       if (pool) {
-        const checkUser = await pool.query(
-          'SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR (phone IS NOT NULL AND phone = $2 AND phone <> \'\')', 
-          [email, formattedPhone || '']
-        );
-        if (checkUser.rows.length > 0) {
-          const matchedEmail = checkUser.rows.some((r: any) => r.email?.toLowerCase() === email.toLowerCase());
-          const matchedPhone = formattedPhone ? checkUser.rows.some((r: any) => r.phone === formattedPhone) : false;
-          if (matchedEmail) {
-            return res.status(400).json({ error: 'User with this Email address already exists' });
-          } else if (matchedPhone) {
-            return res.status(400).json({ error: 'User with this Mobile number already exists' });
-          }
-          return res.status(400).json({ error: 'User already exists' });
+        await ensureUsersTable(pool);
+
+        let checkRows: any[] = [];
+        try {
+          const checkUser = await pool.query(
+            'SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR (phone IS NOT NULL AND phone = $2 AND phone <> \'\')', 
+            [email, formattedPhone || '']
+          );
+          checkRows = checkUser.rows;
+        } catch (dbQueryErr: any) {
+          console.warn('Postgres check user query warning, falling back to JSON check:', dbQueryErr?.message);
+          const rawUsers = safeReadJson(USERS_FILE, []);
+          checkRows = Array.isArray(rawUsers) ? rawUsers : [];
         }
 
-        let result;
+        const matchedEmail = checkRows.some((r: any) => r.email?.toLowerCase() === email.toLowerCase());
+        const matchedPhone = formattedPhone ? checkRows.some((r: any) => r.phone === formattedPhone) : false;
+        if (matchedEmail) {
+          return res.status(400).json({ error: 'User with this Email address already exists' });
+        } else if (matchedPhone) {
+          return res.status(400).json({ error: 'User with this Mobile number already exists' });
+        }
+
         try {
-          result = await pool.query(
+          const result = await pool.query(
             `INSERT INTO users (email, password_hash, first_name, last_name, phone, emergency_contact_encrypted, created_at) 
              VALUES ($1, $2, $3, $4, $5, $6, NOW()) 
              RETURNING id, email, first_name, last_name, phone`,
             [email, passwordHash, firstName, lastName, formattedPhone || '', encryptedEmergencyContact]
           );
-        } catch (dbErr: any) {
-          if (dbErr?.code === '42703' || dbErr?.message?.includes('emergency_contact_encrypted') || dbErr?.message?.includes('does not exist')) {
-            console.warn('⚠️ Adding missing user columns to database table on the fly...');
-            try {
-              await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;');
-              await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS emergency_contact_encrypted TEXT;');
-              await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_legacy_auth BOOLEAN DEFAULT FALSE;');
-              await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE;');
-              await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;');
-
-              result = await pool.query(
-                `INSERT INTO users (email, password_hash, first_name, last_name, phone, emergency_contact_encrypted, created_at) 
-                 VALUES ($1, $2, $3, $4, $5, $6, NOW()) 
-                 RETURNING id, email, first_name, last_name, phone`,
-                [email, passwordHash, firstName, lastName, formattedPhone || '', encryptedEmergencyContact]
-              );
-            } catch (retryErr) {
-              result = await pool.query(
-                `INSERT INTO users (email, password_hash, first_name, last_name, phone) 
-                 VALUES ($1, $2, $3, $4, $5) 
-                 RETURNING id, email, first_name, last_name, phone`,
-                [email, passwordHash, firstName, lastName, formattedPhone || '']
-              );
-            }
-          } else {
-            throw dbErr;
-          }
+          user = result.rows[0];
+        } catch (dbInsertErr: any) {
+          console.warn('Postgres insert user failed, falling back to JSON storage:', dbInsertErr?.message);
+          const rawUsers = safeReadJson(USERS_FILE, []);
+          const users = Array.isArray(rawUsers) ? rawUsers : [];
+          user = {
+            id: Date.now().toString(),
+            email: email,
+            password_hash: passwordHash,
+            first_name: firstName,
+            last_name: lastName,
+            phone: formattedPhone || '',
+            emergency_contact_encrypted: encryptedEmergencyContact,
+            created_at: new Date().toISOString()
+          };
+          users.push(user);
+          safeWriteJson(USERS_FILE, users);
         }
-        user = result.rows[0];
       } else {
-        const users = safeReadJson(USERS_FILE, []);
+        const rawUsers = safeReadJson(USERS_FILE, []);
+        const users = Array.isArray(rawUsers) ? rawUsers : [];
         const matchedEmail = users.find((u: any) => u.email?.toLowerCase() === email.toLowerCase());
         const matchedPhone = formattedPhone ? users.find((u: any) => u.phone === formattedPhone) : null;
         
@@ -1982,13 +1993,14 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         safeWriteJson(USERS_FILE, users);
       }
       
-      const { accessToken, csrfToken } = await issueAuthTokens(req, res, { id: user.id, email: user.email });
+      const userIdStr = String(user.id);
+      const { accessToken, csrfToken } = await issueAuthTokens(req, res, { id: userIdStr, email: user.email });
 
       // Trigger sync of registration data to userlogindata Google Spreadsheet
       const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
       syncUserLoginDataToSheets({
         action: 'REGISTER',
-        userId: user.id,
+        userId: userIdStr,
         email: user.email,
         firstName: user.first_name || user.firstName || firstName || '',
         lastName: user.last_name || user.lastName || lastName || '',
@@ -1997,21 +2009,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         userAgent: (req.headers['user-agent'] || '').toString()
       }).catch(err => console.warn('User login sheet sync error:', err));
 
-      res.status(201).json({ 
+      return res.status(201).json({ 
         success: true, 
         token: accessToken, 
         csrfToken,
         user: { 
-          id: user.id, 
+          id: userIdStr, 
           email: user.email,
-          firstName: user.first_name || user.firstName || '',
-          lastName: user.last_name || user.lastName || '',
-          phone: user.phone || ''
+          firstName: user.first_name || user.firstName || firstName || '',
+          lastName: user.last_name || user.lastName || lastName || '',
+          phone: user.phone || formattedPhone || ''
         } 
       });
     } catch (err: any) {
       console.error('Registration error:', err);
-      res.status(500).json({ error: 'Failed to register' });
+      return res.status(500).json({ error: err?.message || 'Failed to register account. Please try again.' });
     }
   });
 
@@ -2025,12 +2037,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
       const { email, password } = parseResult.data;
 
-      let user;
+      let user: any = null;
       if (pool) {
-        const result = await pool.query('SELECT * FROM users WHERE email = $1 OR phone = $1', [email]);
-        user = result.rows[0];
+        await ensureUsersTable(pool);
+        try {
+          const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR phone = $1', [email]);
+          user = result.rows[0];
+        } catch (dbQueryErr: any) {
+          console.warn('Postgres login query warning, falling back to local file:', dbQueryErr?.message);
+          const rawUsers = safeReadJson(USERS_FILE, []);
+          const users = Array.isArray(rawUsers) ? rawUsers : [];
+          user = users.find((u: any) => u.email?.toLowerCase() === email.toLowerCase() || (u.phone && u.phone === email));
+        }
       } else {
-        const users = safeReadJson(USERS_FILE, []);
+        const rawUsers = safeReadJson(USERS_FILE, []);
+        const users = Array.isArray(rawUsers) ? rawUsers : [];
         user = users.find((u: any) => u.email?.toLowerCase() === email.toLowerCase() || (u.phone && u.phone === email));
       }
 
@@ -2051,7 +2072,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
           // Transparently upgrade user to bcrypt(12) hash without forcing password reset!
           const newBcryptHash = await bcrypt.hash(password, 12);
           if (pool) {
-            await pool.query('UPDATE users SET password_hash = $1, is_legacy_auth = FALSE WHERE id = $2', [newBcryptHash, user.id]);
+            try {
+              await pool.query('UPDATE users SET password_hash = $1, is_legacy_auth = FALSE WHERE id = $2', [newBcryptHash, user.id]);
+            } catch (e) {}
           }
         }
       }
@@ -2065,13 +2088,14 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(() => {});
       }
 
-      const { accessToken, csrfToken } = await issueAuthTokens(req, res, { id: user.id, email: user.email });
+      const userIdStr = String(user.id);
+      const { accessToken, csrfToken } = await issueAuthTokens(req, res, { id: userIdStr, email: user.email });
 
       // Trigger sync of login data to userlogindata Google Spreadsheet
       const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
       syncUserLoginDataToSheets({
         action: 'LOGIN',
-        userId: user.id,
+        userId: userIdStr,
         email: user.email,
         firstName: user.first_name || user.firstName || '',
         lastName: user.last_name || user.lastName || '',
@@ -2080,12 +2104,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         userAgent: (req.headers['user-agent'] || '').toString()
       }).catch(err => console.warn('User login sheet sync error:', err));
 
-      res.json({ 
+      return res.json({ 
         success: true, 
         token: accessToken, 
         csrfToken,
         user: { 
-          id: user.id, 
+          id: userIdStr, 
           email: user.email,
           firstName: user.first_name || user.firstName || '',
           lastName: user.last_name || user.lastName || '',
@@ -2094,7 +2118,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       });
     } catch (err: any) {
       console.error('Login error:', err);
-      res.status(500).json({ error: 'Failed to login' });
+      return res.status(500).json({ error: err?.message || 'Failed to login. Please try again.' });
     }
   });
 
@@ -2189,23 +2213,35 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       }
 
       const decoded: any = jwt.verify(token, JWT_SECRET);
-      let user;
+      let user: any = null;
 
       if (pool) {
-        const result = await pool.query('SELECT id, email, first_name, last_name, phone FROM users WHERE id = $1', [decoded.userId]);
-        user = result.rows[0];
+        await ensureUsersTable(pool);
+        try {
+          const result = await pool.query(
+            'SELECT id, email, first_name, last_name, phone FROM users WHERE CAST(id AS TEXT) = $1 OR LOWER(email) = LOWER($2)', 
+            [String(decoded.userId), String(decoded.email || '')]
+          );
+          user = result.rows[0];
+        } catch (dbQueryErr: any) {
+          console.warn('Postgres profile lookup warning, falling back to JSON:', dbQueryErr?.message);
+          const rawUsers = safeReadJson(USERS_FILE, []);
+          const users = Array.isArray(rawUsers) ? rawUsers : [];
+          user = users.find((u: any) => String(u.id) === String(decoded.userId) || u.email?.toLowerCase() === decoded.email?.toLowerCase());
+        }
       } else {
-        const users = safeReadJson(USERS_FILE, []);
-        user = users.find((u: any) => u.id === decoded.userId);
+        const rawUsers = safeReadJson(USERS_FILE, []);
+        const users = Array.isArray(rawUsers) ? rawUsers : [];
+        user = users.find((u: any) => String(u.id) === String(decoded.userId) || u.email?.toLowerCase() === decoded.email?.toLowerCase());
       }
 
       if (!user) {
         return res.status(404).json({ error: 'User profile not found' });
       }
 
-      res.json({
+      return res.json({
         user: {
-          id: user.id,
+          id: String(user.id),
           email: user.email,
           firstName: user.first_name || user.firstName || '',
           lastName: user.last_name || user.lastName || '',
@@ -2213,7 +2249,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         }
       });
     } catch (err) {
-      res.status(401).json({ error: 'Invalid or expired access session' });
+      return res.status(401).json({ error: 'Invalid or expired access session' });
     }
   });
 
