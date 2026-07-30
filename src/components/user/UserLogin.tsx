@@ -101,16 +101,22 @@ export default function UserLogin({ onSuccess, onCancel, isModal = false }: User
         body: body,
       });
 
-      let data;
+      let data: any = {};
       const text = await res.text();
       try {
         data = JSON.parse(text);
       } catch (err) {
-        throw new Error('Server returned an invalid response. Please try again.');
+        if (!res.ok) {
+          throw new Error(`Server error (${res.status}). Please check API backend deployment.`);
+        }
+        if (text && text.trim().startsWith('<')) {
+          throw new Error('Server returned HTML instead of JSON. Ensure Vercel serverless build is active.');
+        }
+        throw new Error('Server returned an invalid response. Please check server logs and try again.');
       }
 
       if (!res.ok) {
-        throw new Error(data.error || 'Authentication failed');
+        throw new Error(data.error || `Authentication failed (Status ${res.status})`);
       }
 
       if (data.token) {
