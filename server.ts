@@ -12,7 +12,13 @@ import sharp from 'sharp';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
 import pg from 'pg';
-import { Pool as NeonPool } from '@neondatabase/serverless';
+import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
+import ws from 'ws';
+
+// Required for @neondatabase/serverless WebSocket driver in Node.js serverless environments
+if (neonConfig) {
+  neonConfig.webSocketConstructor = ws;
+}
 import bcrypt from 'bcrypt';
 import cookieParser from 'cookie-parser';
 import { z } from 'zod';
@@ -111,6 +117,12 @@ FRONTEND_URL=${process.env.FRONTEND_URL || 'http://localhost:3000'}`;
 
 const { Pool } = pg;
 let pool: any = null;
+
+export async function getDbPool() {
+  if (pool) return pool;
+  await initDatabase();
+  return pool;
+}
 
 const currentFilename = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : __filename);
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilename);
@@ -379,9 +391,10 @@ async function logSheetSyncAttempt(bookingId: string, status: 'SUCCESS' | 'FAILE
   if (status === 'SUCCESS') {
     await setAdminConfig('last_successful_sync_time', timestamp).catch(() => {});
   }
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      await pool.query(
+      await activePool.query(
         'INSERT INTO sheet_sync_logs (booking_id, status, error_message, timestamp) VALUES ($1, $2, $3, $4)',
         [targetId, status, errorMessage || null, timestamp]
       );
@@ -398,9 +411,10 @@ async function logSheetSyncAttempt(bookingId: string, status: 'SUCCESS' | 'FAILE
 async function markQueueSynced(bookingId: string) {
   if (!bookingId) return;
   const syncedAt = new Date().toISOString();
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      await pool.query(
+      await activePool.query(
         'UPDATE sheet_sync_queue SET synced = TRUE, synced_at = $1, last_error = NULL WHERE booking_id = $2',
         [syncedAt, bookingId]
       );
@@ -424,9 +438,10 @@ async function enqueueFailedSync(bookingId: string, payload: any, errorMsg: stri
     console.warn("⚠️ Skipping enqueueFailedSync due to missing booking ID:", { bookingId, payload, errorMsg });
     return;
   }
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      await pool.query(`
+      await activePool.query(`
         INSERT INTO sheet_sync_queue (booking_id, payload, attempt_count, last_error, synced, created_at)
         VALUES ($1, $2, 1, $3, FALSE, CURRENT_TIMESTAMP)
         ON CONFLICT (booking_id) DO UPDATE SET
@@ -512,9 +527,10 @@ async function retryFailedSheetSyncs() {
 
   let pendingItems: any[] = [];
 
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      const res = await pool.query('SELECT * FROM sheet_sync_queue WHERE synced = FALSE ORDER BY created_at ASC LIMIT 50');
+      const res = await activePool.query('SELECT * FROM sheet_sync_queue WHERE synced = FALSE ORDER BY created_at ASC LIMIT 50');
       pendingItems = res.rows.map(r => ({
         bookingId: r.booking_id,
         payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload
@@ -726,9 +742,10 @@ async function initDatabase() {
 }
 
 async function getAdminConfig(key: string): Promise<string | null> {
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      const { rows } = await pool.query('SELECT value FROM admin_config WHERE key = $1', [key]);
+      const { rows } = await activePool.query('SELECT value FROM admin_config WHERE key = $1', [key]);
       if (rows.length > 0) return rows[0].value;
     } catch (e) {
       console.error("Error reading from admin_config:", e);
@@ -739,9 +756,10 @@ async function getAdminConfig(key: string): Promise<string | null> {
 }
 
 async function setAdminConfig(key: string, value: string): Promise<void> {
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      await pool.query(`
+      await activePool.query(`
         INSERT INTO admin_config (key, value) 
         VALUES ($1, $2) 
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
@@ -758,9 +776,10 @@ async function setAdminConfig(key: string, value: string): Promise<void> {
 }
 
 async function getAdminUser(username: string = 'admin'): Promise<any | null> {
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      const { rows } = await pool.query('SELECT * FROM admin_users WHERE username = $1', [username]);
+      const { rows } = await activePool.query('SELECT * FROM admin_users WHERE username = $1', [username]);
       if (rows.length > 0) {
         return {
           username: rows[0].username,
@@ -780,7 +799,8 @@ async function getAdminUser(username: string = 'admin'): Promise<any | null> {
 }
 
 async function saveAdminUser(username: string = 'admin', fields: Partial<{ password_hash: string; mobile_number: string; otp_code: string; otp_expiry: string }>): Promise<void> {
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
       const existing = await getAdminUser(username);
       if (existing) {
@@ -871,7 +891,8 @@ function writeLocalBooking(booking: any) {
 
 async function getBookings(filter?: { source?: string }) {
   let dbList: any[] = [];
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
       let query = 'SELECT * FROM bookings WHERE is_deleted = FALSE OR is_deleted IS NULL';
       const params: any[] = [];
@@ -881,7 +902,7 @@ async function getBookings(filter?: { source?: string }) {
       }
       query += ' ORDER BY created_at DESC';
 
-      const { rows } = await pool.query(query, params);
+      const { rows } = await activePool.query(query, params);
       dbList = rows.map((r: any) => {
         let parsedActivities = [];
         try {
@@ -953,12 +974,13 @@ async function saveBooking(booking: any) {
   // Always write locally first for immediate local storage persistence
   writeLocalBooking(entry);
 
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
       console.log(`💾 [PostgreSQL] Saving booking ${booking.id} (source: ${source}) into database...`);
       const actStr = typeof entry.activities === 'string' ? entry.activities : JSON.stringify(entry.activities || []);
 
-      await pool.query(`
+      await activePool.query(`
         INSERT INTO bookings (
           id, booking_id, first_name, last_name, phone, email, date, time, guests, activities, 
           special_request, total_amount, advance_paid, balance_paid, remaining_due, 
@@ -1062,7 +1084,8 @@ async function updateBookingInDb(id: string, updates: any) {
   const merged = { ...current, ...updates, id };
   writeLocalBooking(merged);
 
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
       const fields: string[] = [];
       const values: any[] = [];
@@ -1105,7 +1128,7 @@ async function updateBookingInDb(id: string, updates: any) {
       if (fields.length > 0) {
         values.push(id);
         const query = `UPDATE bookings SET ${fields.join(', ')} WHERE id = $${idx}`;
-        await pool.query(query, values);
+        await activePool.query(query, values);
       }
     } catch (err: any) {
       console.error(`⚠️ PostgreSQL update failed for ${id}: ${err.message}`);
@@ -1116,9 +1139,10 @@ async function updateBookingInDb(id: string, updates: any) {
 async function getBookingById(id: string) {
   if (!id) return null;
   const cleanId = String(id).trim();
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      const { rows } = await pool.query(
+      const { rows } = await activePool.query(
         'SELECT * FROM bookings WHERE LOWER(id) = LOWER($1) OR LOWER(booking_id) = LOWER($1)', 
         [cleanId]
       );
@@ -1175,10 +1199,11 @@ async function saveWaiverAgreement(waiver: any) {
   const waiverId = waiver.id || ("WAV-" + waiver.bookingId);
   const bookingId = waiver.bookingId || waiverId;
 
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
       console.log(`💾 [Neon/PostgreSQL] Upserting waiver agreement ${waiverId} for booking ${bookingId}...`);
-      await pool.query(`
+      await activePool.query(`
         INSERT INTO waiver_agreements (
           id, booking_id, guest_name, communication_address, phone, email, signature, agreement_date,
           has_minor, guardian_name, guardian_address, guardian_phone, guardian_email, guardian_signature, guardian_agreement_date,
@@ -1239,9 +1264,10 @@ async function saveWaiverAgreement(waiver: any) {
 async function getWaiverByBookingId(bookingId: string) {
   if (!bookingId) return null;
 
-  if (pool) {
+  const activePool = await getDbPool();
+  if (activePool) {
     try {
-      const { rows } = await pool.query('SELECT * FROM waiver_agreements WHERE booking_id = $1 OR id = $1', [bookingId]);
+      const { rows } = await activePool.query('SELECT * FROM waiver_agreements WHERE booking_id = $1 OR id = $1', [bookingId]);
       if (rows.length > 0) {
         const r = rows[0];
         return {
@@ -1319,8 +1345,9 @@ async function getWaiverByBookingId(bookingId: string) {
 }
 
 async function deleteBookingInDb(id: string) {
-  if (pool) {
-    await pool.query('UPDATE bookings SET is_deleted = TRUE WHERE id = $1', [id]);
+  const activePool = await getDbPool();
+  if (activePool) {
+    await activePool.query('UPDATE bookings SET is_deleted = TRUE WHERE id = $1', [id]);
   } else {
     const pendingFile = path.join(DATA_DIR, 'pending_bookings.json');
     const pendingList = safeReadJson(pendingFile, []);
@@ -1584,7 +1611,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
   });
 
   // Endpoint to check database connection status
-  app.get('/api/db-status', (req, res) => {
+  app.get('/api/db-status', async (req, res) => {
+    const activePool = await getDbPool();
     const rawUrl = process.env.DATABASE_URL?.trim();
     let databaseUrlMasked = null;
     if (rawUrl) {
@@ -1599,8 +1627,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       }
     }
     res.json({
-      connected: pool !== null,
-      type: pool ? "postgres" : "local",
+      connected: activePool !== null,
+      type: activePool ? "postgres" : "local",
       databaseUrlSet: !!rawUrl,
       databaseUrlMasked
     });
@@ -1856,10 +1884,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     // Track session token in NeonDB if database connection active
-    if (pool) {
+    const activePool = await getDbPool();
+    if (activePool) {
       try {
-        await ensureRefreshTokensTable(pool);
-        await pool.query(
+        await ensureRefreshTokensTable(activePool);
+        await activePool.query(
           `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at) 
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (token_hash) DO NOTHING`,
@@ -1924,13 +1953,14 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       // 3. Encrypt Sensitive Fields at Rest (e.g., Emergency Contact)
       const encryptedEmergencyContact = emergencyContact ? encryptSensitiveData(emergencyContact) : '';
 
+      const activePool = await getDbPool();
       let user: any = null;
-      if (pool) {
-        await ensureUsersTable(pool);
+      if (activePool) {
+        await ensureUsersTable(activePool);
 
         let checkRows: any[] = [];
         try {
-          const checkUser = await pool.query(
+          const checkUser = await activePool.query(
             'SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR (phone IS NOT NULL AND phone = $2 AND phone <> \'\')', 
             [email, formattedPhone || '']
           );
@@ -1950,7 +1980,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         }
 
         try {
-          const result = await pool.query(
+          const result = await activePool.query(
             `INSERT INTO users (email, password_hash, first_name, last_name, phone, emergency_contact_encrypted, created_at) 
              VALUES ($1, $2, $3, $4, $5, $6, NOW()) 
              RETURNING id, email, first_name, last_name, phone`,
@@ -2045,11 +2075,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
       const { email, password } = parseResult.data;
 
+      const activePool = await getDbPool();
       let user: any = null;
-      if (pool) {
-        await ensureUsersTable(pool);
+      if (activePool) {
+        await ensureUsersTable(activePool);
         try {
-          const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR phone = $1', [email]);
+          const result = await activePool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR phone = $1', [email]);
           user = result.rows[0];
         } catch (dbQueryErr: any) {
           console.warn('Postgres login query warning, falling back to local file:', dbQueryErr?.message);
@@ -2079,9 +2110,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         if (match) {
           // Transparently upgrade user to bcrypt(12) hash without forcing password reset!
           const newBcryptHash = await bcrypt.hash(password, 12);
-          if (pool) {
+          if (activePool) {
             try {
-              await pool.query('UPDATE users SET password_hash = $1, is_legacy_auth = FALSE WHERE id = $2', [newBcryptHash, user.id]);
+              await activePool.query('UPDATE users SET password_hash = $1, is_legacy_auth = FALSE WHERE id = $2', [newBcryptHash, user.id]);
             } catch (e) {}
           }
         }
@@ -2092,8 +2123,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       }
 
       // Update last login timestamp in DB
-      if (pool) {
-        pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(() => {});
+      if (activePool) {
+        activePool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(() => {});
       }
 
       const userIdStr = String(user.id);
