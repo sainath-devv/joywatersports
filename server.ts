@@ -110,7 +110,8 @@ let pool: pg.Pool | null = null;
 const currentFilename = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : __filename);
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilename);
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+const isVercel = !!process.env.VERCEL;
+const DATA_DIR = isVercel ? path.join('/tmp', 'data') : path.join(process.cwd(), 'data');
 const BOOKINGS_FILE = path.join(DATA_DIR, 'bookings.json');
 const WAIVER_AGREEMENTS_FILE = path.join(DATA_DIR, 'waiver_agreements.json');
 const MANUAL_BOOKINGS_FILE = path.join(DATA_DIR, 'manual_bookings.json');
@@ -119,27 +120,59 @@ const CHATBOT_FILE = path.join(DATA_DIR, 'chatbot_store.json');
 const COUPONS_FILE = path.join(DATA_DIR, 'coupons.json');
 
 // Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+} catch (e) {
+  console.warn(`Could not create DATA_DIR at ${DATA_DIR}, using /tmp/data fallback.`);
+}
+
+// Safe write JSON helper that handles read-only filesystems (e.g. Vercel) gracefully
+export function safeWriteJson(filePath: string, data: any) {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  } catch (err: any) {
+    console.warn(`⚠️ Write failed for ${filePath}: ${err.message}. Trying /tmp fallback.`);
+    try {
+      const fileName = path.basename(filePath);
+      const tmpPath = path.join('/tmp', 'data', fileName);
+      const tmpDir = path.dirname(tmpPath);
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    } catch (tmpErr) {
+      console.error(`❌ Fallback write to /tmp failed for ${filePath}:`, tmpErr);
+    }
+  }
 }
 
 // Robust JSON file reader helper that handles empty or corrupted files gracefully
 function safeReadJson(filePath: string, defaultValue: any): any {
   try {
     if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2));
+      const fileName = path.basename(filePath);
+      const tmpPath = path.join('/tmp', 'data', fileName);
+      if (fs.existsSync(tmpPath)) {
+        const content = fs.readFileSync(tmpPath, 'utf-8').trim();
+        if (content) return JSON.parse(content);
+      }
+      safeWriteJson(filePath, defaultValue);
       return defaultValue;
     }
     const content = fs.readFileSync(filePath, 'utf-8').trim();
     if (!content) {
-      fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2));
+      safeWriteJson(filePath, defaultValue);
       return defaultValue;
     }
     return JSON.parse(content);
   } catch (e) {
     console.warn(`⚠️ Error reading/parsing JSON from ${filePath}. Resetting to default.`, e);
     try {
-      fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2));
+      safeWriteJson(filePath, defaultValue);
     } catch (err) {
       console.error(`❌ Failed to reset JSON file ${filePath}:`, err);
     }
@@ -1466,29 +1499,23 @@ class ChatbotService {
 
 export const app = express();
 
-async function startServer() {
-  await initDatabase().catch((err) => {
-    console.error("Database connection failed during initialization:", err);
-  });
-  const PORT = 3000; // Rigidly bound to port 3000
+// Configure Express middleware synchronously at module load time for instant Vercel Serverless availability
+app.set('trust proxy', 1);
 
-  app.set('trust proxy', 1);
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
 
-  app.use(helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false,
-  }));
-  
-  app.use(cors({
-    origin: true,
-    credentials: true
-  }));
-  app.use(express.json());
-  app.use(cookieParser());
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+app.use(express.json());
+app.use(cookieParser());
+app.use(sanitizeInput);
 
-  app.use(sanitizeInput);
-
-  const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
+const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
   // Health check endpoint
   app.get('/api/health', (req, res) => {
@@ -3434,46 +3461,35 @@ async function startServer() {
     }
   });
 
+  // Explicit API 404 JSON fallback handler for any unhandled /api/* requests
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: `API endpoint ${req.method} ${req.path} not found` });
+  });
 
+async function startServer() {
+  // Initialize database connection asynchronously in background so Express routes attach synchronously
+  initDatabase().catch((err) => {
+    console.error("Database connection failed during initialization:", err);
+  });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
+  const PORT = 3000;
 
-  // Schedule background retry job for Neon DB sync every 30 seconds
-  setInterval(() => {
-    if (pool) {
-      reconcilePendingBookings().catch(err => console.error("Periodic Neon DB sync error:", err));
-    }
-  }, 30 * 1000);
-
-  // Schedule background retry job for Google Sheets sync every 5 minutes
-  setInterval(() => {
-    retryFailedSheetSyncs().catch(err => console.error("Periodic sheet sync retry error:", err));
-  }, 5 * 60 * 1000);
-
-  // Trigger immediate seed and retry on server startup
-  setTimeout(async () => {
-    try {
-      await setAdminConfig('google_sheets_url', DEFAULT_GOOGLE_SHEETS_URL);
-      await setAdminConfig('user_login_sheets_url', DEFAULT_USER_LOGIN_SHEETS_URL);
-      console.log('✅ Google Sheets Webhook URLs initialized and active.');
-    } catch (e) {}
-    retryFailedSheetSyncs().catch(err => console.error("Initial boot sheet sync retry error:", err));
-  }, 2000);
-
+  // On non-Vercel environment (local dev or container), setup Vite/Static fallback & start listener
   if (!process.env.VERCEL) {
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
     app.listen(PORT, '0.0.0.0', async () => {
       const sheetsUrl = await getActiveGoogleSheetsUrl();
       const userLoginSheetsUrl = await getActiveUserLoginSheetsUrl();
@@ -3486,7 +3502,28 @@ async function startServer() {
       console.log(`🔑 Admin Authentication: Using custom JWT & Password`);
       console.log(`========================================\n`);
     });
+
+    // Schedule background retry jobs
+    setInterval(() => {
+      if (pool) {
+        reconcilePendingBookings().catch(err => console.error("Periodic Neon DB sync error:", err));
+      }
+    }, 30 * 1000);
+
+    setInterval(() => {
+      retryFailedSheetSyncs().catch(err => console.error("Periodic sheet sync retry error:", err));
+    }, 5 * 60 * 1000);
   }
+
+  // Trigger immediate seed and retry on server startup
+  setTimeout(async () => {
+    try {
+      await setAdminConfig('google_sheets_url', DEFAULT_GOOGLE_SHEETS_URL);
+      await setAdminConfig('user_login_sheets_url', DEFAULT_USER_LOGIN_SHEETS_URL);
+      console.log('✅ Google Sheets Webhook URLs initialized and active.');
+    } catch (e) {}
+    retryFailedSheetSyncs().catch(err => console.error("Initial boot sheet sync retry error:", err));
+  }, 2000);
 }
 
 startServer();
