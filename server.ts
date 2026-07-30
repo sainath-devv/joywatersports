@@ -95,13 +95,17 @@ if (!process.env.JWT_SECRET) {
 }
 
 // Auto-generate .env on startup if it doesn't exist to make local VSCode launch flawless
-const envPath = path.join(process.cwd(), '.env');
-if (!fs.existsSync(envPath)) {
-  const defaultEnv = `DATABASE_URL=${process.env.DATABASE_URL}
-JWT_SECRET=${process.env.JWT_SECRET}
-GOOGLE_SHEETS_URL=${process.env.GOOGLE_SHEETS_URL}
+try {
+  const envPath = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envPath)) {
+    const defaultEnv = `DATABASE_URL=${process.env.DATABASE_URL || ''}
+JWT_SECRET=${process.env.JWT_SECRET || 'jwt_secret_jws_default_12345'}
+GOOGLE_SHEETS_URL=${process.env.GOOGLE_SHEETS_URL || ''}
 FRONTEND_URL=${process.env.FRONTEND_URL || 'http://localhost:3000'}`;
-  fs.writeFileSync(envPath, defaultEnv, 'utf-8');
+    fs.writeFileSync(envPath, defaultEnv, 'utf-8');
+  }
+} catch (e) {
+  // Ignore read-only filesystem errors on Vercel / serverless
 }
 
 const { Pool } = pg;
@@ -386,7 +390,7 @@ async function logSheetSyncAttempt(bookingId: string, status: 'SUCCESS' | 'FAILE
     const logs = safeReadJson(logsFile, []);
     logs.unshift({ bookingId: targetId, status, errorMessage: errorMessage || null, timestamp });
     if (logs.length > 200) logs.length = 200;
-    fs.writeFileSync(logsFile, JSON.stringify(logs, null, 2));
+    safeWriteJson(logsFile, logs);
   }
 }
 
@@ -408,7 +412,7 @@ async function markQueueSynced(bookingId: string) {
       item.synced = true;
       item.syncedAt = syncedAt;
       item.lastError = null;
-      fs.writeFileSync(queueFile, JSON.stringify(queue, null, 2));
+      safeWriteJson(queueFile, queue);
     }
   }
 }
@@ -452,7 +456,7 @@ async function enqueueFailedSync(bookingId: string, payload: any, errorMsg: stri
         createdAt: new Date().toISOString()
       });
     }
-    fs.writeFileSync(queueFile, JSON.stringify(queue, null, 2));
+    safeWriteJson(queueFile, queue);
   }
 }
 
@@ -693,7 +697,7 @@ async function setAdminConfig(key: string, value: string): Promise<void> {
   const config = safeReadJson(path.join(DATA_DIR, 'admin_config.json'), {});
   if (config[key] === value) return;
   config[key] = value;
-  fs.writeFileSync(path.join(DATA_DIR, 'admin_config.json'), JSON.stringify(config, null, 2));
+  safeWriteJson(path.join(DATA_DIR, 'admin_config.json'), config);
 }
 
 async function getAdminUser(username: string = 'admin'): Promise<any | null> {
@@ -756,7 +760,7 @@ async function saveAdminUser(username: string = 'admin', fields: Partial<{ passw
     users.push(user);
   }
   Object.assign(user, fields);
-  fs.writeFileSync(path.join(DATA_DIR, 'admin_users.json'), JSON.stringify(users, null, 2));
+  safeWriteJson(path.join(DATA_DIR, 'admin_users.json'), users);
 }
 
 // Helper functions for local disk storage fallback
@@ -796,7 +800,7 @@ function writeLocalBooking(booking: any) {
   } else {
     b1.unshift(booking);
   }
-  fs.writeFileSync(file1, JSON.stringify(b1, null, 2));
+  safeWriteJson(file1, b1);
 
   const b2 = safeReadJson(file2, []);
   const idx2 = b2.findIndex((x: any) => x.id === booking.id);
@@ -805,7 +809,7 @@ function writeLocalBooking(booking: any) {
   } else {
     b2.unshift(booking);
   }
-  fs.writeFileSync(file2, JSON.stringify(b2, null, 2));
+  safeWriteJson(file2, b2);
 }
 
 async function getBookings(filter?: { source?: string }) {
@@ -1172,7 +1176,7 @@ async function saveWaiverAgreement(waiver: any) {
   } else {
     data.push(updatedEntry);
   }
-  fs.writeFileSync(WAIVER_AGREEMENTS_FILE, JSON.stringify(data, null, 2));
+  safeWriteJson(WAIVER_AGREEMENTS_FILE, data);
 }
 
 async function getWaiverByBookingId(bookingId: string) {
@@ -1266,7 +1270,7 @@ async function deleteBookingInDb(id: string) {
     const idx = pendingList.findIndex((b: any) => b.id === id);
     if (idx !== -1) {
       pendingList[idx].isDeleted = true;
-      fs.writeFileSync(pendingFile, JSON.stringify(pendingList, null, 2));
+      safeWriteJson(pendingFile, pendingList);
     }
   }
 }
@@ -1399,7 +1403,7 @@ async function reconcilePendingBookings() {
   }
 
   if (fs.existsSync(pendingFile)) {
-    fs.writeFileSync(pendingFile, JSON.stringify([], null, 2));
+    safeWriteJson(pendingFile, []);
   }
 
   return {
@@ -1975,7 +1979,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
           created_at: new Date().toISOString()
         };
         users.push(user);
-        fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+        safeWriteJson(USERS_FILE, users);
       }
       
       const { accessToken, csrfToken } = await issueAuthTokens(req, res, { id: user.id, email: user.email });
@@ -2812,7 +2816,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         createdAt: new Date().toISOString()
       };
       coupons.unshift(newCoupon);
-      fs.writeFileSync(COUPONS_FILE, JSON.stringify(coupons, null, 2));
+      safeWriteJson(COUPONS_FILE, coupons);
       res.json({ success: true, coupon: newCoupon });
     } catch (err) {
       res.status(500).json({ error: 'Failed to create coupon' });
@@ -2828,7 +2832,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         return res.status(404).json({ error: 'Coupon not found' });
       }
       coupons[idx] = { ...coupons[idx], ...req.body };
-      fs.writeFileSync(COUPONS_FILE, JSON.stringify(coupons, null, 2));
+      safeWriteJson(COUPONS_FILE, coupons);
       res.json({ success: true, coupon: coupons[idx] });
     } catch (err) {
       res.status(500).json({ error: 'Failed to update coupon' });
@@ -2840,7 +2844,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     try {
       let coupons = safeReadJson(COUPONS_FILE, []);
       coupons = coupons.filter((c: any) => c.id !== req.params.id);
-      fs.writeFileSync(COUPONS_FILE, JSON.stringify(coupons, null, 2));
+      safeWriteJson(COUPONS_FILE, coupons);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: 'Failed to delete coupon' });
@@ -3222,7 +3226,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
       for (const filePath of jsonFilesToEmpty) {
         try {
-          fs.writeFileSync(filePath, JSON.stringify([], null, 2));
+          safeWriteJson(filePath, []);
         } catch (e) {
           console.error(`Error emptying ${filePath}:`, e);
         }
