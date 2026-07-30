@@ -12,6 +12,7 @@ import sharp from 'sharp';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
 import pg from 'pg';
+import { Pool as NeonPool } from '@neondatabase/serverless';
 import bcrypt from 'bcrypt';
 import cookieParser from 'cookie-parser';
 import { z } from 'zod';
@@ -109,7 +110,7 @@ FRONTEND_URL=${process.env.FRONTEND_URL || 'http://localhost:3000'}`;
 }
 
 const { Pool } = pg;
-let pool: pg.Pool | null = null;
+let pool: any = null;
 
 const currentFilename = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : __filename);
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilename);
@@ -643,15 +644,22 @@ async function initDatabase() {
 
   if (dbUrl && dbUrl.startsWith('postgres')) {
     try {
-      console.log(`🔌 [PostgreSQL] Connecting to database (${isLocalHost ? 'Local PostgreSQL' : 'Remote Neon'})...`);
-      let tempPool = new Pool({
-        connectionString: dbUrl,
-        ssl: isLocalHost ? false : { rejectUnauthorized: false },
-        connectionTimeoutMillis: 15000, // 15 seconds allowance for Neon compute cold-start waking up
-        idleTimeoutMillis: 30000
-      });
+      const isNeon = dbUrl.includes('neon.tech') || isVercel;
+      console.log(`🔌 [PostgreSQL] Connecting to database (${isLocalHost ? 'Local PostgreSQL' : 'Remote Neon Serverless'})...`);
+      
+      let tempPool: any;
+      if (isNeon) {
+        tempPool = new NeonPool({ connectionString: dbUrl });
+      } else {
+        tempPool = new Pool({
+          connectionString: dbUrl,
+          ssl: isLocalHost ? false : { rejectUnauthorized: false },
+          connectionTimeoutMillis: 15000,
+          idleTimeoutMillis: 30000
+        });
+      }
 
-      tempPool.on('error', (err) => {
+      tempPool.on('error', (err: any) => {
         console.error('Unexpected database error:', err.message);
       });
 
