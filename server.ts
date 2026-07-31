@@ -2722,8 +2722,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
   app.get(['/api/bookings', '/api/admin/bookings'], adminAuth, async (req, res) => {
     try {
-      const bookings = await getBookings();
-      res.json(bookings);
+      const all = await getBookings();
+      const onlineOnly = all.filter((b: any) => b.source !== 'manual' && !b.id?.startsWith('JMB'));
+      res.json(onlineOnly);
     } catch (err) {
       res.status(500).json({ error: 'Failed to get bookings' });
     }
@@ -2731,7 +2732,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
 
   app.get('/api/bookings/export', adminAuth, async (req, res) => {
     try {
-      const bookings = await getBookings();
+      const all = await getBookings();
+      const bookings = all.filter((b: any) => b.source !== 'manual' && !b.id?.startsWith('JMB'));
 
       const formattedBookings = bookings.map((b: any) => {
         let formattedCreatedAt = b.createdAt;
@@ -2930,7 +2932,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
   app.get('/api/manual-bookings', adminAuth, async (req, res) => {
     try {
       const bList = await getManualBookings();
-      res.json(bList);
+      const manualOnly = bList.filter((b: any) => b.source === 'manual' || b.id?.startsWith('JMB'));
+      res.json(manualOnly);
     } catch (err) {
       res.status(500).json({ error: 'Failed to retrieve manual bookings' });
     }
