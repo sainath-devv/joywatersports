@@ -3,7 +3,7 @@ import {
   Lock, ArrowRight, Download, Search, Check, RefreshCw, Smartphone, Mail, AlertCircle, 
   Trash2, QrCode as QrCodeIcon, KeyRound, ExternalLink, Calendar, Plus, UserCheck, 
   FileCheck, Copy, Shield, Sparkles, Filter, CheckCircle2, ChevronRight, Share2, 
-  DollarSign, Table, Send, Ticket, Clock, CheckCircle, Tag, Camera, LayoutDashboard,
+  DollarSign, Table, Send, Ticket, Clock, CheckCircle, Tag, Camera, LayoutDashboard, Save,
   Receipt, BarChart3, SlidersHorizontal, ToggleLeft, ToggleRight, X, Globe
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -185,6 +185,23 @@ export default function AdminPage() {
 
   // Scanner alert banner state
   const [scanAlert, setScanAlert] = useState<{ show: boolean; type: 'success' | 'error' | 'warning'; title: string; message: string; booking?: Booking } | null>(null);
+
+  // Helper to switch sidebar tab and synchronize activeAdminTab cleanly
+  const changeSidebarTab = (tab: 'dashboard' | 'bookings' | 'manual' | 'scanner' | 'coupons') => {
+    setSidebarTab(tab);
+    if (tab === 'bookings') setActiveAdminTab('standard');
+    if (tab === 'manual') setActiveAdminTab('manual');
+    setScanAlert(null); // Clear any banner when changing tabs
+  };
+
+  useEffect(() => {
+    if (scanAlert && scanAlert.show) {
+      const timer = setTimeout(() => {
+        setScanAlert(null);
+      }, 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [scanAlert]);
 
   // Filtering & Pagination
   const [ticketFilter, setTicketFilter] = useState<string>('All');
@@ -437,7 +454,8 @@ export default function AdminPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setBookings(data);
+        const onlineOnly = Array.isArray(data) ? data.filter((b: any) => b.source !== 'manual' && !b.id?.startsWith('JMB')) : [];
+        setBookings(onlineOnly);
         setSecondsSinceSync(0);
       } else if (response.status === 401) {
         handleLogout();
@@ -456,7 +474,8 @@ export default function AdminPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setManualBookings(data);
+        const manualOnly = Array.isArray(data) ? data.filter((b: any) => b.source === 'manual' || b.id?.startsWith('JMB')) : [];
+        setManualBookings(manualOnly);
       }
     } catch (error) {
       console.error("Error fetching manual bookings:", error);
@@ -920,6 +939,7 @@ export default function AdminPage() {
     const val = e.target.value;
     setSearchQuery(val);
     setCurrentPage(1);
+    if (scanAlert) setScanAlert(null);
 
     if (val.trim().toUpperCase().startsWith('JMB')) {
       setActiveAdminTab('manual');
@@ -1174,12 +1194,24 @@ export default function AdminPage() {
     const isJMB = selectedBooking.id.startsWith('JMB');
     const endpoint = isJMB ? `/api/manual-bookings/${selectedBooking.id}` : `/api/bookings/${selectedBooking.id}`;
 
+    let advance = Number(editAdvancePaid) || 0;
+    let balance = Number(editBalancePaid) || 0;
+
+    // If check-in is requested and remaining due exists, auto-settle balance
+    if (checkIn && (total - advance - balance) > 0) {
+      balance = Math.max(0, total - advance);
+      setEditBalancePaid(balance);
+    }
+
+    const calculatedRem = Math.max(0, total - advance - balance);
+    const newPaymentStatus = calculatedRem === 0 ? 'Completed' : (editPaymentStatus || 'Partial Paid');
+
     const updatePayload: any = {
-      advancePaid: Number(editAdvancePaid) || 0,
+      advancePaid: advance,
       advancePaymentMode: editAdvanceMode,
-      balancePaid: Number(editBalancePaid) || 0,
+      balancePaid: balance,
       balancePaymentMode: editBalanceMode,
-      paymentStatus: editPaymentStatus,
+      paymentStatus: newPaymentStatus,
     };
 
     if (isEditingActivities || editActivities.length > 0) {
@@ -1196,11 +1228,8 @@ export default function AdminPage() {
       updatePayload.totalAmount = total;
     }
 
-    const advance = Number(editAdvancePaid) || 0;
-    const balance = Number(editBalancePaid) || 0;
-
     if (advance < 0 || balance < 0 || advance > total || balance > total || (advance + balance) > total) {
-      alert(`Please enter a valid payment amount! Payment cannot exceed total bill amount of ₹${total.toLocaleString('en-IN')}.`);
+      alert(`Please enter a valid payment amount! Total payment cannot exceed total bill amount of ₹${total.toLocaleString('en-IN')}.`);
       setSavingBooking(false);
       return;
     }
@@ -1332,8 +1361,14 @@ export default function AdminPage() {
   const totalStandardBalance = bookings.reduce((sum, b) => sum + (b.balancePaid || 0), 0);
   const totalManualBalance = manualBookings.reduce((sum, b) => sum + (b.balancePaid || 0), 0);
 
-  const totalStandardDue = bookings.reduce((sum, b) => sum + (b.remainingDue || 0), 0);
-  const totalManualDue = manualBookings.reduce((sum, b) => sum + (b.remainingDue || 0), 0);
+  const totalStandardDue = bookings.reduce((sum, b) => {
+    const rem = b.remainingDue !== undefined ? b.remainingDue : Math.max(0, (b.totalAmount || 0) - (b.advancePaid || 0) - (b.balancePaid || 0));
+    return sum + rem;
+  }, 0);
+  const totalManualDue = manualBookings.reduce((sum, b) => {
+    const rem = b.remainingDue !== undefined ? b.remainingDue : Math.max(0, (b.totalAmount || 0) - (b.advancePaid || 0) - (b.balancePaid || 0));
+    return sum + rem;
+  }, 0);
   const totalOverallDue = totalStandardDue + totalManualDue;
 
   const totalGuestsServed = [...bookings, ...manualBookings].reduce((sum, b) => sum + (b.guests || 1), 0);
@@ -1646,129 +1681,163 @@ export default function AdminPage() {
           </div>
 
           <div className="flex items-center flex-wrap gap-2.5">
-            <button
-              onClick={() => setShowRevenueModal(true)}
-              className="bg-[#004E98] hover:bg-[#003B73] text-white px-4 py-2 rounded-full font-semibold text-xs transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
-            >
-              <BarChart3 size={15} /> Collection Stats
-            </button>
+            {/* Action Group 1: Primary Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowManualBooking(true)}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-full font-bold text-xs transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-[0.98]"
+              >
+                <Plus size={15} /> Walk-in Ticket
+              </button>
 
-            <button
-              onClick={handleOpenSheetsModal}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-800 px-4 py-2 rounded-full font-semibold text-xs border border-slate-200/60 flex items-center gap-1.5 transition-all cursor-pointer"
-            >
-              <Table size={15} className="text-emerald-600" /> Google Sheets Sync
-            </button>
+              <button
+                onClick={() => setShowScanner(true)}
+                className="bg-[#004E98] hover:bg-[#003B73] text-white px-3.5 py-2 rounded-full font-bold text-xs transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-[0.98]"
+              >
+                <QrCodeIcon size={15} /> Scan QR
+              </button>
 
-            <button
-              onClick={exportExcel}
-              className="bg-blue-50 hover:bg-blue-100 text-[#004E98] px-3.5 py-2 rounded-full font-semibold text-xs border border-blue-200/60 flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-              title="Export Online Web Bookings History to Excel"
-            >
-              <Download size={14} /> Export Online History
-            </button>
+              <button
+                onClick={() => setShowRevenueModal(true)}
+                className="bg-slate-900 hover:bg-black text-white px-3.5 py-2 rounded-full font-semibold text-xs transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-[0.98]"
+              >
+                <BarChart3 size={15} /> Stats
+              </button>
+            </div>
 
-            <button
-              onClick={exportManualExcel}
-              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3.5 py-2 rounded-full font-semibold text-xs border border-emerald-200/60 flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-              title="Export Desk Walk-in Bookings History to Excel"
-            >
-              <Download size={14} /> Export Walk-in History
-            </button>
+            <div className="h-4 w-[1px] bg-slate-200 hidden md:block"></div>
 
-            <button
-              onClick={handleLogout}
-              className="bg-rose-50 hover:bg-rose-100 text-rose-700 px-3.5 py-2 rounded-full font-semibold text-xs border border-rose-200/60 transition-all flex items-center gap-1 cursor-pointer"
-            >
-              Logout
-            </button>
+            {/* Action Group 2: Sync & Export */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleOpenSheetsModal}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-800 px-3 py-2 rounded-full font-semibold text-xs border border-slate-200/80 flex items-center gap-1.5 transition-all cursor-pointer"
+                title="Google Sheets Live Sync"
+              >
+                <Table size={14} className="text-emerald-600" /> Sync Sheets
+              </button>
 
-            <a
-              href="/"
-              target="_blank"
-              rel="noreferrer"
-              className="text-slate-400 hover:text-slate-800 p-2 rounded-full transition-colors"
-              title="View Public Booking Page"
-            >
-              <ExternalLink size={18} />
-            </a>
+              <button
+                onClick={exportExcel}
+                className="bg-blue-50 hover:bg-blue-100 text-[#004E98] px-3 py-2 rounded-full font-semibold text-xs border border-blue-200/80 flex items-center gap-1.5 transition-all cursor-pointer"
+                title="Export Online Web Bookings History to Excel"
+              >
+                <Download size={13} /> Export Web
+              </button>
+
+              <button
+                onClick={exportManualExcel}
+                className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3 py-2 rounded-full font-semibold text-xs border border-emerald-200/80 flex items-center gap-1.5 transition-all cursor-pointer"
+                title="Export Desk Walk-in Bookings History to Excel"
+              >
+                <Download size={13} /> Export Walk-in
+              </button>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-200 hidden md:block"></div>
+
+            {/* Action Group 3: User Session */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleLogout}
+                className="bg-rose-50 hover:bg-rose-100 text-rose-700 px-3.5 py-2 rounded-full font-semibold text-xs border border-rose-200/80 transition-all flex items-center gap-1 cursor-pointer"
+              >
+                Logout
+              </button>
+
+              <a
+                href="/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-slate-400 hover:text-slate-800 p-2 rounded-full hover:bg-slate-100 transition-colors"
+                title="View Public Booking Page"
+              >
+                <ExternalLink size={16} />
+              </a>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main Container: Left Sidebar Navigation + Right Content Column */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-8 py-6 flex flex-col lg:flex-row gap-6">
+      <div className="max-w-7xl mx-auto px-4 sm:px-8 py-8 flex flex-col lg:flex-row gap-8">
         
         {/* Clean Left Sidebar Navigation */}
         <aside className="lg:w-64 shrink-0">
-          <div className="bg-white rounded-3xl p-3 shadow-xs border border-slate-200/60 flex flex-row lg:flex-col gap-1.5 overflow-x-auto lg:overflow-visible sticky top-20">
+          <div className="bg-white rounded-3xl p-3 shadow-xs border border-slate-200/80 flex flex-row lg:flex-col gap-1.5 overflow-x-auto lg:overflow-visible sticky top-24">
             
             <button
-              onClick={() => setSidebarTab('dashboard')}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              onClick={() => changeSidebarTab('dashboard')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 sidebarTab === 'dashboard' 
-                  ? 'bg-[#004E98]/10 text-[#004E98] font-bold shadow-2xs' 
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  ? 'bg-[#004E98] text-white font-bold shadow-md shadow-[#004E98]/20' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
               }`}
             >
               <LayoutDashboard size={18} /> Dashboard & Stats
             </button>
 
             <button
-              onClick={() => {
-                setSidebarTab('bookings');
-                setActiveAdminTab('standard');
-              }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              onClick={() => changeSidebarTab('bookings')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 sidebarTab === 'bookings' 
-                  ? 'bg-[#004E98]/10 text-[#004E98] font-bold shadow-2xs border border-[#004E98]/20' 
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  ? 'bg-[#004E98] text-white font-bold shadow-md shadow-[#004E98]/20' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
               }`}
             >
-              <Ticket size={18} className="text-[#004E98]" /> Online History
-              <span className="ml-auto bg-blue-50 text-[#004E98] border border-blue-200/80 text-xs font-bold px-2 py-0.5 rounded-full">
+              <Ticket size={18} /> Online History
+              <span className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full ${
+                sidebarTab === 'bookings'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-blue-50 text-[#004E98] border border-blue-200/80'
+              }`}>
                 {bookings.length}
               </span>
             </button>
 
             <button
-              onClick={() => {
-                setSidebarTab('manual');
-                setActiveAdminTab('manual');
-              }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              onClick={() => changeSidebarTab('manual')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 sidebarTab === 'manual' 
-                  ? 'bg-emerald-50 text-emerald-800 font-bold shadow-2xs border border-emerald-200/80' 
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  ? 'bg-[#004E98] text-white font-bold shadow-md shadow-[#004E98]/20' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
               }`}
             >
-              <Receipt size={18} className="text-emerald-600" /> Walk-in History
-              <span className="ml-auto bg-emerald-50 text-emerald-800 border border-emerald-200/80 text-xs font-bold px-2 py-0.5 rounded-full">
+              <Receipt size={18} /> Walk-in History
+              <span className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full ${
+                sidebarTab === 'manual'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200/80'
+              }`}>
                 {manualBookings.length}
               </span>
             </button>
 
             <button
-              onClick={() => setSidebarTab('scanner')}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              onClick={() => changeSidebarTab('scanner')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 sidebarTab === 'scanner' 
-                  ? 'bg-[#004E98]/10 text-[#004E98] font-bold shadow-2xs' 
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  ? 'bg-[#004E98] text-white font-bold shadow-md shadow-[#004E98]/20' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
               }`}
             >
               <QrCodeIcon size={18} /> QR Ticket Scanner
             </button>
 
             <button
-              onClick={() => setSidebarTab('coupons')}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              onClick={() => changeSidebarTab('coupons')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 sidebarTab === 'coupons' 
-                  ? 'bg-[#004E98]/10 text-[#004E98] font-bold shadow-2xs' 
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  ? 'bg-[#004E98] text-white font-bold shadow-md shadow-[#004E98]/20' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
               }`}
             >
               <Tag size={18} /> Coupon Engine
-              <span className="ml-auto bg-slate-100 text-slate-700 text-xs font-bold px-2 py-0.5 rounded-full">
+              <span className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full ${
+                sidebarTab === 'coupons'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-slate-100 text-slate-700 border border-slate-200'
+              }`}>
                 {coupons.length}
               </span>
             </button>
@@ -1857,10 +1926,11 @@ export default function AdminPage() {
                 </div>
 
                 <div className="bg-white rounded-3xl p-6 shadow-xs border border-slate-200/60">
-                  <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-2">Counter Balance Due</span>
+                  <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-2">Total Pending Due</span>
                   <p className="text-3xl font-extrabold text-amber-600 tracking-tight">₹{totalOverallDue.toLocaleString('en-IN')}</p>
-                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-medium text-slate-500">
-                    <span>Pending collection</span>
+                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-bold">
+                    <span className="text-[#004E98]">Online: ₹{totalStandardDue.toLocaleString('en-IN')}</span>
+                    <span className="text-emerald-700">Counter: ₹{totalManualDue.toLocaleString('en-IN')}</span>
                   </div>
                 </div>
 
@@ -2065,6 +2135,16 @@ export default function AdminPage() {
                     }`}>
                       {filteredBookings.length} History Logs
                     </span>
+
+                    {activeAdminTab === 'standard' ? (
+                      <span className="text-xs font-bold px-2.5 py-0.5 rounded-full border bg-rose-50 text-rose-700 border-rose-200 flex items-center gap-1">
+                        <AlertCircle size={12} /> Pending Due: ₹{totalStandardDue.toLocaleString('en-IN')}
+                      </span>
+                    ) : (
+                      <span className="text-xs font-bold px-2.5 py-0.5 rounded-full border bg-rose-50 text-rose-700 border-rose-200 flex items-center gap-1">
+                        <AlertCircle size={12} /> Counter Pending: ₹{totalManualDue.toLocaleString('en-IN')}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-500 font-medium mt-0.5">
                     {activeAdminTab === 'standard' 
@@ -2155,20 +2235,20 @@ export default function AdminPage() {
                   No history entries found matching current search/filter.
                 </div>
               ) : (
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto rounded-2xl border border-slate-200/80 shadow-2xs">
                   <table className="w-full text-left text-xs">
                     <thead>
-                      <tr className="border-b border-slate-100 text-slate-400 font-semibold uppercase tracking-wider">
-                        <th className="pb-3 px-2">Customer / ID</th>
-                        <th className="pb-3 px-2">Channel</th>
-                        <th className="pb-3 px-2">Contact</th>
-                        <th className="pb-3 px-2">Schedule</th>
-                        <th className="pb-3 px-2">Ticket Status</th>
-                        <th className="pb-3 px-2">Payment</th>
-                        <th className="pb-3 px-2 text-right">Action</th>
+                      <tr className="bg-slate-100/90 border-b border-slate-200 text-slate-700 font-bold uppercase tracking-wider text-[11px]">
+                        <th className="py-3.5 px-4">Customer / ID</th>
+                        <th className="py-3.5 px-4">Channel</th>
+                        <th className="py-3.5 px-4">Contact</th>
+                        <th className="py-3.5 px-4">Schedule</th>
+                        <th className="py-3.5 px-4">Ticket Status</th>
+                        <th className="py-3.5 px-4">Payment & Due</th>
+                        <th className="py-3.5 px-4 text-right">Actions</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody className="divide-y divide-slate-200/60 font-medium text-slate-700">
                       {activeBookingsList.map(b => {
                         const remaining = b.remainingDue !== undefined ? b.remainingDue : Math.max(0, (b.totalAmount || 0) - (b.advancePaid || 0) - (b.balancePaid || 0));
                         const isPaid = remaining === 0;
@@ -2181,67 +2261,67 @@ export default function AdminPage() {
                               setSelectedBooking(b);
                               fetchWaiver(b.id);
                             }}
-                            className="hover:bg-slate-50/80 transition-colors cursor-pointer group"
+                            className="even:bg-slate-50/60 hover:bg-blue-50/40 transition-colors border-b border-slate-200/60 cursor-pointer group"
                           >
-                            <td className="py-3.5 px-2">
-                              <div className="font-bold text-slate-900 text-sm">{b.firstName} {b.lastName || ''}</div>
-                              <div className="text-[11px] font-mono text-slate-400 font-semibold">#{b.id}</div>
+                            <td className="py-4 px-4">
+                              <div className="font-bold text-slate-900 text-sm tracking-tight">{b.firstName} {b.lastName || ''}</div>
+                              <div className="text-[11px] font-mono text-slate-500 font-bold mt-0.5">#{b.id}</div>
                             </td>
 
-                            <td className="py-3.5 px-2">
+                            <td className="py-4 px-4">
                               {isWalkin ? (
-                                <span className="bg-emerald-50 text-emerald-800 border border-emerald-200/80 text-[10px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1">
-                                  <Receipt size={11} className="text-emerald-600" /> Desk Walk-in
+                                <span className="bg-emerald-100/80 text-emerald-900 border border-emerald-300/80 text-[10px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                  <Receipt size={11} className="text-emerald-700" /> Desk Walk-in
                                 </span>
                               ) : (
-                                <span className="bg-blue-50 text-[#004E98] border border-blue-200/80 text-[10px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                <span className="bg-blue-100/80 text-[#004E98] border border-blue-300/80 text-[10px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1">
                                   <Globe size={11} className="text-[#004E98]" /> Online Web
                                 </span>
                               )}
                             </td>
 
-                            <td className="py-3.5 px-2">
-                              <div className="font-semibold text-slate-800">{b.phone}</div>
-                              <div className="text-[11px] text-slate-400 truncate max-w-[140px]">{b.email}</div>
+                            <td className="py-4 px-4">
+                              <div className="font-bold text-slate-800">{b.phone}</div>
+                              <div className="text-[11px] text-slate-500 truncate max-w-[140px]">{b.email || '—'}</div>
                             </td>
 
-                            <td className="py-3.5 px-2">
-                              <div className="font-semibold text-slate-800">{b.date}</div>
+                            <td className="py-4 px-4">
+                              <div className="font-bold text-slate-800">{b.date}</div>
                               <div className="text-[11px] text-slate-500 font-medium">{formatTime(b.time)}</div>
                             </td>
 
-                            <td className="py-3.5 px-2">
-                              <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 ${
+                            <td className="py-4 px-4">
+                              <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold inline-flex items-center gap-1 ${
                                 b.ticketStatus === 'Checked In'
-                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
-                                  : 'bg-slate-100 text-slate-600 border border-slate-200/60'
+                                  ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                  : 'bg-slate-100 text-slate-700 border border-slate-200'
                               }`}>
-                                {b.ticketStatus === 'Checked In' && <Check size={12} />}
-                                {b.ticketStatus || 'Pending'}
+                                {b.ticketStatus === 'Checked In' && <Check size={12} className="text-emerald-700" />}
+                                {b.ticketStatus || 'Pending Check-in'}
                               </span>
                             </td>
 
-                            <td className="py-3.5 px-2">
-                              <div className="font-extrabold text-slate-900 text-sm">₹{b.totalAmount}</div>
+                            <td className="py-4 px-4">
+                              <div className="font-black text-slate-900 text-sm">₹{b.totalAmount?.toLocaleString('en-IN')}</div>
                               {isPaid ? (
-                                <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60 inline-flex items-center gap-1 mt-0.5">
-                                  <Check size={10} /> Paid
+                                <span className="text-[10px] text-emerald-800 font-bold bg-emerald-100 px-2.5 py-0.5 rounded-full border border-emerald-300 inline-flex items-center gap-1 mt-1">
+                                  <Check size={10} /> Paid in Full
                                 </span>
                               ) : (
-                                <span className="text-[10px] text-amber-700 font-bold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200/60 inline-flex items-center gap-1 mt-0.5">
-                                  Due: ₹{remaining}
+                                <span className="text-[11px] text-rose-800 font-extrabold bg-rose-100 px-2.5 py-0.5 rounded-full border border-rose-300 inline-flex items-center gap-1 mt-1 shadow-2xs">
+                                  <AlertCircle size={10} /> Due: ₹{remaining?.toLocaleString('en-IN')}
                                 </span>
                               )}
                             </td>
 
-                            <td className="py-3.5 px-2 text-right">
-                              <div className="flex items-center justify-end gap-2" onClick={e => e.stopPropagation()}>
+                            <td className="py-4 px-4 text-right">
+                              <div className="flex items-center justify-end gap-2.5" onClick={e => e.stopPropagation()}>
                                 <button
                                   onClick={() => {
                                     setSelectedBooking(b);
                                     fetchWaiver(b.id);
                                   }}
-                                  className="px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all cursor-pointer"
+                                  className="px-3.5 py-1.5 rounded-full text-xs font-bold bg-[#004E98] hover:bg-[#003B73] text-white shadow-2xs transition-all cursor-pointer active:scale-95"
                                 >
                                   Manage
                                 </button>
@@ -2250,10 +2330,10 @@ export default function AdminPage() {
                                     if (b.id?.startsWith('JMB')) deleteManualBooking(b.id);
                                     else deleteBooking(b.id);
                                   }}
-                                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-full transition-colors cursor-pointer"
-                                  title="Delete"
+                                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200/80 hover:border-rose-300 rounded-full transition-colors cursor-pointer"
+                                  title="Delete Booking"
                                 >
-                                  <Trash2 size={16} />
+                                  <Trash2 size={15} />
                                 </button>
                               </div>
                             </td>
@@ -2633,7 +2713,7 @@ export default function AdminPage() {
                   <>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block mb-1 font-semibold">Advance Payment Collected (₹)</label>
+                        <label className="block mb-1 font-semibold">Payment Collected (₹)</label>
                         <input
                           type="number"
                           value={manualBookingForm.advancePaid}
@@ -2908,7 +2988,15 @@ export default function AdminPage() {
                         <input
                           type="number"
                           value={editAdvancePaid}
-                          onChange={e => setEditAdvancePaid(Number(e.target.value) || 0)}
+                          onChange={e => {
+                            const val = Number(e.target.value) || 0;
+                            setEditAdvancePaid(val);
+                            if (totalAmt > 0 && (val + Number(editBalancePaid)) >= totalAmt) {
+                              setEditPaymentStatus('Completed');
+                            } else if ((val + Number(editBalancePaid)) > 0 && editPaymentStatus === 'Pending') {
+                              setEditPaymentStatus('Partial Paid');
+                            }
+                          }}
                           className={`w-full pl-6 pr-2 py-1.5 bg-slate-50 border rounded-lg text-xs font-bold text-right outline-none focus:border-[#004E98] ${
                             Number(editAdvancePaid) > totalAmt || Number(editAdvancePaid) < 0 ? 'text-red-600 border-red-500' : 'text-slate-900 border-slate-200'
                           }`}
@@ -2938,7 +3026,15 @@ export default function AdminPage() {
                         <input
                           type="number"
                           value={editBalancePaid}
-                          onChange={e => setEditBalancePaid(Number(e.target.value) || 0)}
+                          onChange={e => {
+                            const val = Number(e.target.value) || 0;
+                            setEditBalancePaid(val);
+                            if (totalAmt > 0 && (Number(editAdvancePaid) + val) >= totalAmt) {
+                              setEditPaymentStatus('Completed');
+                            } else if ((Number(editAdvancePaid) + val) > 0 && editPaymentStatus === 'Pending') {
+                              setEditPaymentStatus('Partial Paid');
+                            }
+                          }}
                           className={`w-full pl-6 pr-2 py-1.5 bg-slate-50 border rounded-lg text-xs font-bold text-right outline-none focus:border-[#004E98] ${
                             Number(editBalancePaid) > totalAmt || Number(editBalancePaid) < 0 ? 'text-red-600 border-red-500' : 'text-slate-900 border-slate-200'
                           }`}
@@ -2970,9 +3066,22 @@ export default function AdminPage() {
                   <div>
                     <span className="text-xs text-slate-500 font-semibold block mb-0.5">Remaining Counter Due</span>
                     {liveRem > 0 ? (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200/80 px-3 py-1 rounded-full transition-all">
-                        <AlertCircle size={13} /> Due ₹{liveRem.toLocaleString('en-IN')}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200/80 px-3 py-1 rounded-full">
+                          <AlertCircle size={13} /> Due ₹{liveRem.toLocaleString('en-IN')}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newBal = (Number(editBalancePaid) || 0) + liveRem;
+                            setEditBalancePaid(newBal);
+                            setEditPaymentStatus('Completed');
+                          }}
+                          className="text-[10px] font-bold text-[#004E98] bg-[#004E98]/10 hover:bg-[#004E98]/20 px-2.5 py-1 rounded-full transition-colors cursor-pointer"
+                        >
+                          + Settle ₹{liveRem}
+                        </button>
+                      </div>
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-3 py-1 rounded-full transition-all">
                         <CheckCircle2 size={13} /> Paid in full (₹0)
@@ -2988,8 +3097,7 @@ export default function AdminPage() {
                       onChange={e => setEditPaymentStatus(e.target.value)}
                       className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:border-[#004E98] shadow-2xs"
                     >
-                      <option value="Collected">Collected / Completed</option>
-                      <option value="Completed">Completed</option>
+                      <option value="Completed">Collected / Completed</option>
                       <option value="Partial Paid">Partial Paid</option>
                       <option value="Pending">Pending</option>
                     </select>
@@ -2997,56 +3105,58 @@ export default function AdminPage() {
                 </div>
               </div>
 
-              {/* 11. Ticket Status & Check-In Control */}
-              <div className="space-y-2">
-                {liveRem > 0 ? (
-                  <div className="p-3 bg-rose-50/90 border border-rose-200/80 rounded-2xl flex items-center gap-2.5 text-rose-800 text-xs font-medium">
-                    <Lock size={16} className="text-rose-600 shrink-0" />
-                    <span>Check-in locked until remaining due (₹{liveRem.toLocaleString('en-IN')}) is settled</span>
-                  </div>
-                ) : (
-                  <div className="p-3 bg-emerald-50/90 border border-emerald-200/80 rounded-2xl flex items-center gap-2.5 text-emerald-800 text-xs font-medium">
-                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-                    <span>Payment settled in full. Ticket ready for check-in.</span>
+              {/* 11. Ticket Status & Confirmation Actions */}
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Confirmation Actions</span>
+                
+                {liveRem > 0 && (
+                  <div className="p-3 bg-amber-50 border border-amber-200/80 rounded-xl flex items-center gap-2 text-amber-800 text-xs font-medium">
+                    <AlertCircle size={16} className="text-amber-600 shrink-0" />
+                    <span>Remaining due is ₹{liveRem.toLocaleString('en-IN')}. Clicking "Check-In" will auto-settle balance or you can click "Save Payment".</span>
                   </div>
                 )}
 
-                <button
-                  disabled={liveRem > 0 || savingBooking}
-                  onClick={() => handleSaveBookingModal(true)}
-                  className={`w-full py-3.5 rounded-full font-bold text-xs tracking-wide transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer ${
-                    liveRem > 0
-                      ? 'bg-slate-100 text-slate-400 border border-slate-200/80 cursor-not-allowed'
-                      : isCheckedIn
-                      ? 'bg-emerald-700 text-white hover:bg-emerald-800'
-                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                  }`}
-                >
-                  {savingBooking ? (
-                    <RefreshCw size={16} className="animate-spin" />
-                  ) : isCheckedIn ? (
-                    <>
-                      <CheckCircle size={16} /> Already Checked In (Save Updates)
-                    </>
-                  ) : liveRem > 0 ? (
-                    <>
-                      <Lock size={16} /> Collect ₹{liveRem} & Check In
-                    </>
-                  ) : (
-                    <>
-                      <UserCheck size={16} /> Confirm Check In Ticket
-                    </>
-                  )}
-                </button>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Option 1: Save Payment / Updates */}
+                  <button
+                    type="button"
+                    onClick={() => handleSaveBookingModal(false)}
+                    disabled={savingBooking}
+                    className="w-full py-3.5 px-4 bg-[#004E98] hover:bg-[#003B73] active:scale-[0.98] text-white rounded-2xl font-bold text-xs tracking-wide transition-all shadow-md shadow-[#004E98]/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {savingBooking ? (
+                      <RefreshCw size={16} className="animate-spin" />
+                    ) : (
+                      <>
+                        <Save size={16} /> Save Payment
+                      </>
+                    )}
+                  </button>
 
-                {/* Save Payment Changes Button */}
-                <button
-                  onClick={() => handleSaveBookingModal(false)}
-                  disabled={savingBooking}
-                  className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-semibold text-xs transition-colors cursor-pointer"
-                >
-                  Save Payment Changes
-                </button>
+                  {/* Option 2: Confirm Check-In Ticket */}
+                  <button
+                    type="button"
+                    disabled={savingBooking}
+                    onClick={() => handleSaveBookingModal(true)}
+                    className={`w-full py-3.5 px-4 rounded-2xl font-bold text-xs tracking-wide transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer active:scale-[0.99] ${
+                      isCheckedIn
+                        ? 'bg-emerald-700 text-white hover:bg-emerald-800'
+                        : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    }`}
+                  >
+                    {savingBooking ? (
+                      <RefreshCw size={16} className="animate-spin" />
+                    ) : isCheckedIn ? (
+                      <>
+                        <CheckCircle size={16} /> Already Checked In
+                      </>
+                    ) : (
+                      <>
+                        <UserCheck size={16} /> Confirm Check-In
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* 12. Liability Waiver Release Form Card */}
@@ -3265,9 +3375,19 @@ export default function AdminPage() {
                 <span>Desk Walk-in Revenue:</span>
                 <span className="text-base font-extrabold text-emerald-600">₹{totalManualGross.toLocaleString('en-IN')}</span>
               </div>
-              <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200/60 flex justify-between items-center text-amber-900">
-                <span>Outstanding Counter Balance Due:</span>
-                <span className="text-base font-extrabold">₹{totalOverallDue.toLocaleString('en-IN')}</span>
+              <div className="bg-amber-50/80 rounded-2xl p-4 border border-amber-200/80 space-y-2 text-amber-950">
+                <div className="flex justify-between items-center font-bold">
+                  <span>Total Pending Dues (Combined):</span>
+                  <span className="text-base font-extrabold text-rose-700">₹{totalOverallDue.toLocaleString('en-IN')}</span>
+                </div>
+                <div className="pt-2 border-t border-amber-200/60 flex justify-between items-center text-xs font-semibold">
+                  <span className="text-[#004E98] flex items-center gap-1.5"><Globe size={13} /> Online Pending Dues:</span>
+                  <span className="font-extrabold text-slate-900">₹{totalStandardDue.toLocaleString('en-IN')}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs font-semibold">
+                  <span className="text-emerald-800 flex items-center gap-1.5"><Receipt size={13} /> Desk / Counter Pending Dues:</span>
+                  <span className="font-extrabold text-slate-900">₹{totalManualDue.toLocaleString('en-IN')}</span>
+                </div>
               </div>
             </div>
 
