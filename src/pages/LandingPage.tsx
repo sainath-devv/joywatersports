@@ -29,8 +29,7 @@ export default function LandingPage() {
     time: "",
     guests: "1",
     activities: [] as string[],
-    specialRequest: "",
-    advancePaid: ""
+    specialRequest: ""
   });
   const [bookingStep, setBookingStep] = useState(1);
   const [waiverData, setWaiverData] = useState({
@@ -315,14 +314,6 @@ export default function LandingPage() {
       const [hours, minutes] = formData.time.split(':').map(Number);
       if (hours < 9 || (hours >= 17 && minutes > 0) || hours > 17) {
         setErrorMessage("Please select a time between 09:00 AM and 05:00 PM.");
-        return false;
-      }
-    }
-
-    if (formData.advancePaid !== "") {
-      const adv = Number(formData.advancePaid);
-      if (isNaN(adv) || adv < 0 || adv > totalAmount) {
-        setErrorMessage(`Enter valid amount! Advance amount cannot exceed total price of ₹${totalAmount.toLocaleString('en-IN')}.`);
         return false;
       }
     }
@@ -1259,51 +1250,14 @@ export default function LandingPage() {
                           )}
                         </div>
 
-                        {/* Total & Advance Payment & Notes Row */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          <div className="flex flex-col gap-1 text-left">
-                            <p className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Total Bill Amount</p>
-                            <div className="bg-ocean-blue/5 border border-ocean-blue/10 rounded-xl px-3.5 py-2.5 sm:py-3 text-center flex items-center justify-center">
-                              <span className="text-sm sm:text-base font-bold text-ocean-blue">₹{totalAmount.toLocaleString('en-IN')}</span>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col gap-1 text-left">
-                            <label htmlFor="advancePaid" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">
-                              Advance Payment (Optional ₹)
-                            </label>
-                            <input 
-                              id="advancePaid" 
-                              name="advancePaid" 
-                              type="number" 
-                              placeholder={`Max ₹${totalAmount}`} 
-                              value={formData.advancePaid} 
-                              onChange={handleChange} 
-                              className={`w-full bg-slate-50/50 px-3.5 py-2.5 sm:py-3 rounded-xl text-sm border outline-none transition ${
-                                formData.advancePaid !== "" && (Number(formData.advancePaid) > totalAmount || Number(formData.advancePaid) < 0)
-                                  ? 'border-red-500 bg-red-50/40 focus:border-red-500 text-red-600 font-bold' 
-                                  : 'border-gray-200 focus:border-ocean-blue'
-                              }`} 
-                            />
+                        {/* Total Bill Amount Display */}
+                        <div className="flex flex-col gap-1 text-left">
+                          <p className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Total Calculated Amount</p>
+                          <div className="bg-ocean-blue/5 border border-ocean-blue/15 rounded-xl px-4 py-3 flex items-center justify-between">
+                            <span className="text-xs font-medium text-slate-600">Total Bill for {formData.guests || 1} guest(s)</span>
+                            <span className="text-base sm:text-lg font-black text-ocean-blue">₹{totalAmount.toLocaleString('en-IN')}</span>
                           </div>
                         </div>
-
-                        {/* Live Amount Validation Warning */}
-                        {formData.advancePaid !== "" && Number(formData.advancePaid) > totalAmount && (
-                          <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-left animate-shake">
-                            <p className="text-red-600 text-xs font-bold flex items-center gap-1.5">
-                              ⚠️ Enter valid amount! Advance payment (₹{Number(formData.advancePaid).toLocaleString('en-IN')}) cannot exceed total bill amount (₹{totalAmount.toLocaleString('en-IN')}).
-                            </p>
-                          </div>
-                        )}
-
-                        {formData.advancePaid !== "" && Number(formData.advancePaid) < 0 && (
-                          <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-left">
-                            <p className="text-red-600 text-xs font-bold flex items-center gap-1.5">
-                              ⚠️ Enter valid amount! Payment amount cannot be negative.
-                            </p>
-                          </div>
-                        )}
 
                         <div className="flex flex-col gap-1 text-left">
                           <label htmlFor="notes" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Special Request (Optional)</label>
