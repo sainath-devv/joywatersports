@@ -124,7 +124,7 @@ export async function getDbPool() {
   return pool;
 }
 
-const currentFilename = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : __filename);
+const currentFilename = typeof __filename !== 'undefined' ? __filename : process.cwd();
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilename);
 
 const isVercel = !!process.env.VERCEL;
@@ -250,15 +250,28 @@ safeReadJson(COUPONS_FILE, defaultCoupons);
 // ========================================
 // GOOGLE SHEETS SYNC & RETRY QUEUE
 // ========================================
-const DEFAULT_GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbzcmDwdsBNCV81sc2Jno5vDv4cMUD5Eajzx0cGR7U9blJX-oQYWrxA3U1X_0q7l-ayoPg/exec';
+const DEFAULT_GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbx5d0sIlWfrCecgrTOrST4r60_yWnPM_28zoYKTnUFpSeizwkJZfX7kx23AMtKDnRYF5A/exec';
+const DEFAULT_DECLARATION_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbx5d0sIlWfrCecgrTOrST4r60_yWnPM_28zoYKTnUFpSeizwkJZfX7kx23AMtKDnRYF5A/exec';
 const DEFAULT_USER_LOGIN_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbyAnJHYBUOXHguJh7mfaf4EVCl8B5AoKbQy39ArPNruunkmhFTGDiXPPFjoaA4wiBWyqg/exec';
 
 async function getActiveGoogleSheetsUrl(): Promise<string> {
   try {
     const customUrl = await getAdminConfig('google_sheets_url');
-    if (customUrl && customUrl.trim()) return customUrl.trim();
+    if (customUrl && customUrl.trim() && !customUrl.includes('AKfycbz4QHrY') && !customUrl.includes('AKfycbyZJbtM')) {
+      return customUrl.trim();
+    }
   } catch (e) {}
   return process.env.GOOGLE_SHEETS_URL?.trim() || DEFAULT_GOOGLE_SHEETS_URL;
+}
+
+async function getActiveDeclarationSheetsUrl(): Promise<string> {
+  try {
+    const customUrl = await getAdminConfig('declaration_sheets_url');
+    if (customUrl && customUrl.trim() && !customUrl.includes('AKfycbz4QHrY') && !customUrl.includes('AKfycbyZJbtM')) {
+      return customUrl.trim();
+    }
+  } catch (e) {}
+  return process.env.DECLARATION_SHEETS_URL?.trim() || DEFAULT_DECLARATION_SHEETS_URL;
 }
 
 async function getActiveUserLoginSheetsUrl(): Promise<string> {
@@ -319,15 +332,21 @@ function buildSheetPayload(booking: any) {
   const id = booking.id || booking.bookingId || '';
   const formatDate = (dateStr: string) => {
     if (!dateStr) return '';
+    const str = String(dateStr).trim();
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) return str;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+      const parts = str.split('-');
+      return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    }
     try {
-      const date = new Date(dateStr);
-      if (isNaN(date.getTime())) return dateStr;
-      const day = date.getDate().toString().padStart(2, '0');
-      const month = (date.getMonth() + 1).toString().padStart(2, '0');
-      const year = date.getFullYear();
+      const date = new Date(str);
+      if (isNaN(date.getTime())) return str;
+      const day = date.getUTCDate().toString().padStart(2, '0');
+      const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+      const year = date.getUTCFullYear();
       return `${day}/${month}/${year}`;
     } catch (e) {
-      return dateStr;
+      return str;
     }
   };
 
@@ -358,29 +377,122 @@ function buildSheetPayload(booking: any) {
   if (!customerName && booking.customerName) {
     customerName = booking.customerName;
   }
-  if (!customerName && booking.name) {
-    customerName = booking.name;
+  if (!customerName && booking.guestName) {
+    customerName = booking.guestName;
   }
 
+  const actStr = Array.isArray(booking.activities)
+    ? booking.activities.join(', ')
+    : (booking.activities || booking.activity || booking.package || booking.packageName || booking.services || '');
+
+  const formattedDate = formatDate(booking.date || booking.dateOfSailing || booking.agreementDate);
+  const formattedTime = formatTime12Hour(booking.time || booking.trip1Time || '');
+
   return {
+    action: 'BOOKING',
+    type: 'BOOKING',
+    category: 'BOOKING_DETAILS',
+    sheetName: 'Sheet1',
+    sheet: 'Sheet1',
+    targetSheet: 'Sheet1',
+
+    // Form Source Identifier
+    formType: 'Online Booking',
+    source: 'Online Booking',
+    formSource: 'Online Booking',
+    "Form Source": 'Online Booking',
+
+    // Core IDs
     id: id,
     bookingId: id,
+    waiverId: id,
+
+    // Header Matcher Aliases (exact Google Sheet Header Names)
+    "Booking Reference": id,
+    "Booking ID": id,
+    "Booking/Invoice ID": id,
+    "Invoice No": id,
+    "Guest Name": customerName || 'Valued Guest',
+    "Customer Name": customerName || 'Valued Guest',
+    "Name": customerName || 'Valued Guest',
+    "Mobile Number": booking.phone || '',
+    "Phone Number": booking.phone || '',
+    "Phone": booking.phone || '',
+    "Email Address": booking.email || '',
+    "Email": booking.email || '',
+    "Date & Time": `${formattedDate} ${formattedTime}`.trim(),
+    "Date": formattedDate,
+    "Time": formattedTime,
+    "Sailing Date": formattedDate,
+    "Date of Sailing": formattedDate,
+    "Time Slot": formattedTime,
+    "Activities": actStr,
+    "Activity": actStr,
+    "Package": actStr,
+    "Total Bill": booking.totalAmount || 0,
+    "Total Amount": booking.totalAmount || 0,
+    "Advance Paid": booking.advancePaid || 0,
+    "Balance Paid": booking.balancePaid || 0,
+    "Remaining Due": booking.remainingDue || 0,
+    "Payment Status": booking.paymentStatus || 'Pending',
+    "Payment Mode": booking.advancePaymentMode || booking.paymentMode || 'Cash',
+    "Communication Address": booking.communicationAddress || booking.address || '',
+    "Address": booking.communicationAddress || booking.address || '',
+
+    // Standard properties
     bookedAt: booking.createdAt ? new Date(booking.createdAt).toLocaleString('en-GB') : (booking.bookedAt || now.toLocaleString('en-GB')),
     customerName: customerName || 'Valued Guest',
+    guestName: customerName || 'Valued Guest',
+    name: customerName || 'Valued Guest',
+    fullName: customerName || 'Valued Guest',
+    clientName: customerName || 'Valued Guest',
     phone: booking.phone || '',
     email: booking.email || '',
-    date: formatDate(booking.date),
-    time: formatTime12Hour(booking.time || ''),
-    activities: Array.isArray(booking.activities) ? booking.activities.join(', ') : (booking.activities || ''),
+    date: formattedDate,
+    sailingDate: formattedDate,
+    dateOfSailing: formattedDate,
+    bookingDate: formattedDate,
+    time: formattedTime,
+    slotTime: formattedTime,
+    timeSlot: formattedTime,
+    trip1Time: formattedTime,
+    bookingTime: formattedTime,
+    activities: actStr,
+    activity: actStr,
+    package: actStr,
+    packageName: actStr,
+    selectedActivities: actStr,
+    activityList: actStr,
+    services: actStr,
     guests: booking.guests || 1,
+    pax: booking.guests || 1,
+    guestCount: booking.guests || 1,
+    noOfGuests: booking.guests || 1,
+    persons: booking.guests || 1,
     totalAmount: booking.totalAmount || 0,
+    total: booking.totalAmount || 0,
+    amount: booking.totalAmount || 0,
     advancePaid: booking.advancePaid || 0,
+    advanceAmount: booking.advancePaid || 0,
     balancePaid: booking.balancePaid || 0,
     remainingDue: booking.remainingDue || 0,
+    due: booking.remainingDue || 0,
+    balance: booking.remainingDue || 0,
     paymentStatus: booking.paymentStatus || 'Pending',
+    status: booking.paymentStatus || 'Pending',
     ticketStatus: booking.ticketStatus || 'Pending',
     paymentMode: booking.advancePaymentMode || booking.paymentMode || 'Cash',
+    advancePaymentMode: booking.advancePaymentMode || booking.paymentMode || 'Cash',
     specialRequest: booking.specialRequest || booking.notes || '',
+    signature: booking.signature || booking.guestSignature || '',
+    guestSignature: booking.signature || booking.guestSignature || '',
+    communicationAddress: booking.communicationAddress || booking.address || '',
+    hasMinor: (booking.hasMinor || booking.hasGuardian || booking.guardianName) ? 'Yes' : 'No',
+    guardianName: booking.guardianName || '',
+    guardianAddress: booking.guardianAddress || '',
+    guardianPhone: booking.guardianPhone || '',
+    guardianEmail: booking.guardianEmail || '',
+    guardianSignature: booking.guardianSignature || '',
     createdAt: booking.createdAt || now.toISOString()
   };
 }
@@ -515,6 +627,239 @@ async function sendToGoogleSheets(booking: any): Promise<boolean> {
     await enqueueFailedSync(targetId, payload, errorMsg);
     await logSheetSyncAttempt(targetId, 'FAILED', errorMsg);
     console.error(`❌ Exception during Google Sheets sync for #${targetId}:`, errorMsg);
+    return false;
+  }
+}
+
+async function sendWaiverToGoogleSheets(waiver: any): Promise<boolean> {
+  if (!waiver) return false;
+  const targetUrl = await getActiveDeclarationSheetsUrl();
+  if (!targetUrl || !targetUrl.trim()) return false;
+
+  const bookingId = waiver.bookingId || waiver.invoiceNo || '';
+  const actionType = waiver.action || 'GENERAL_DECLARATION';
+  const targetId = waiver.id || waiver.waiverId || bookingId || `WAV-${Date.now()}`;
+
+  const rawSig = waiver.signature || waiver.guestSignature || waiver.sig || waiver.clientSignature || '';
+  const finalSig = typeof rawSig === 'string' && rawSig.startsWith('typed:') 
+    ? `Signed Digitally: ${rawSig.replace('typed:', '')}`
+    : (rawSig || (waiver.guestName ? `Digitally Signed by ${waiver.guestName}` : ''));
+
+  const rawGuardianSig = waiver.guardianSignature || waiver.guardianSig || '';
+  const finalGuardianSig = typeof rawGuardianSig === 'string' && rawGuardianSig.startsWith('typed:')
+    ? `Signed Digitally: ${rawGuardianSig.replace('typed:', '')}`
+    : rawGuardianSig;
+
+  const guestNameVal = waiver.guestName || waiver.name || waiver.customerName || '';
+  const totalGuestsVal = parseInt(String(waiver.totalGuests || waiver.guestCount || (Array.isArray(waiver.guestList) ? waiver.guestList.length : 1))) || 1;
+  let guestNamesAndAgesVal = '';
+  if (Array.isArray(waiver.guestList) && waiver.guestList.length > 0) {
+    guestNamesAndAgesVal = waiver.guestList
+      .filter((g: any) => g && (g.name || g.age))
+      .map((g: any, i: number) => `${i + 1}. ${g.name || 'Guest'}${g.age ? ` (${g.age} yrs)` : ''}`)
+      .join(', ');
+  } else {
+    guestNamesAndAgesVal = guestNameVal;
+  }
+
+  const commAddressVal = waiver.communicationAddress || waiver.address || '';
+  const phoneVal = waiver.phone || waiver.mobile || '';
+  const emailVal = waiver.email || '';
+  const agreementDateVal = waiver.agreementDate || waiver.date || new Date().toISOString().split('T')[0];
+  const hasMinorVal = (waiver.hasMinor || waiver.hasGuardian || waiver.guardianName) ? 'Yes' : 'No';
+  const guardianNameVal = waiver.guardianName || '';
+  const guardianAddressVal = waiver.guardianAddress || '';
+  const guardianPhoneVal = waiver.guardianPhone || '';
+  const guardianEmailVal = waiver.guardianEmail || '';
+  const guardianAgreementDateVal = waiver.guardianAgreementDate || '';
+  const dateOfSailingVal = waiver.dateOfSailing || waiver.agreementDate || waiver.date || '';
+  const invoiceNoVal = waiver.invoiceNo || bookingId || '';
+  const boardingPassNoVal = waiver.boardingPassNo || (bookingId ? `BP-${bookingId}` : '');
+  const trip1TimeVal = waiver.trip1Time || waiver.time || '';
+  const boatVal = waiver.boat || (waiver.boatG1 || waiver.boatG1_1 || waiver.boatG1_2 || waiver.boatG1_3 ? 'G1' : '');
+  const timestampVal = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+  const payload = {
+    action: actionType,
+    sheetName: 'Declarations',
+    sheet: 'Declarations',
+    targetSheet: 'Declarations',
+    declarationSheet: 'Declarations',
+    type: 'DECLARATION',
+    waiverId: targetId,
+    id: targetId,
+    bookingId: bookingId || 'N/A',
+
+    // Form Source Identifier
+    formType: waiver.formType || waiver.source || 'Declaration Form',
+    source: waiver.formType || waiver.source || 'Declaration Form',
+    formSource: waiver.formType || waiver.source || 'Declaration Form',
+    "Form Source": waiver.formType || waiver.source || 'Declaration Form',
+
+    // Guest Details (camelCase)
+    guestName: guestNameVal,
+    name: guestNameVal,
+    customerName: guestNameVal,
+    totalGuests: totalGuestsVal,
+    guestList: guestNamesAndAgesVal,
+    guestNamesAndAges: guestNamesAndAgesVal,
+    communicationAddress: commAddressVal,
+    address: commAddressVal,
+    phone: phoneVal,
+    mobile: phoneVal,
+    email: emailVal,
+    
+    // Comprehensive Signature fields for all Apps Script variations
+    signature: finalSig,
+    guestSignature: finalSig,
+    sig: finalSig,
+    signatureData: finalSig,
+    signatureUrl: finalSig,
+    signatureImage: finalSig,
+    clientSignature: finalSig,
+    declarationSignature: finalSig,
+    signed: finalSig ? 'Yes' : 'No',
+    isSigned: Boolean(finalSig),
+
+    agreementDate: agreementDateVal,
+    date: agreementDateVal,
+
+    // Guardian Details (camelCase)
+    hasMinor: hasMinorVal,
+    hasGuardian: hasMinorVal,
+    guardianName: guardianNameVal,
+    guardianAddress: guardianAddressVal,
+    guardianPhone: guardianPhoneVal,
+    guardianEmail: guardianEmailVal,
+    guardianSignature: finalGuardianSig,
+    guardianSig: finalGuardianSig,
+    guardianAgreementDate: guardianAgreementDateVal,
+
+    // Sailing & Trip Details (camelCase)
+    dateOfSailing: dateOfSailingVal,
+    invoiceNo: invoiceNoVal,
+    boardingPassNo: boardingPassNoVal,
+    trip1Time: trip1TimeVal,
+    trip2Time: waiver.trip2Time || '',
+    trip3Time: waiver.trip3Time || '',
+    trip4Time: waiver.trip4Time || '',
+    boat: boatVal,
+    createdAt: waiver.createdAt || new Date().toISOString(),
+    timestamp: timestampVal,
+
+    // Capitalized Spaced Heading Keys (Matching exact Google Sheets column headers)
+    "Waiver ID": targetId,
+    "ID": targetId,
+    "Booking ID": bookingId || 'N/A',
+    "Guest Name": guestNameVal,
+    "Name": guestNameVal,
+    "Customer Name": guestNameVal,
+    "Total Guests": totalGuestsVal,
+    "Guest List": guestNamesAndAgesVal,
+    "Guest Names & Ages": guestNamesAndAgesVal,
+    "Communication Address": commAddressVal,
+    "Address": commAddressVal,
+    "Phone": phoneVal,
+    "Phone Number": phoneVal,
+    "Mobile": phoneVal,
+    "Email": emailVal,
+    "Signature": finalSig,
+    "Guest Signature": finalSig,
+    "Agreement Date": agreementDateVal,
+    "Date": agreementDateVal,
+    "Has Minor": hasMinorVal,
+    "Guardian Name": guardianNameVal,
+    "Guardian Address": guardianAddressVal,
+    "Guardian Phone": guardianPhoneVal,
+    "Guardian Email": guardianEmailVal,
+    "Guardian Signature": finalGuardianSig,
+    "Guardian Agreement Date": guardianAgreementDateVal,
+    "Date of Sailing": dateOfSailingVal,
+    "Sailing Date": dateOfSailingVal,
+    "Invoice No": invoiceNoVal,
+    "Boarding Pass No": boardingPassNoVal,
+    "Trip 1 Time": trip1TimeVal,
+    "Trip Time": trip1TimeVal,
+    "Boat": boatVal,
+    "Created At": waiver.createdAt || new Date().toISOString(),
+    "Timestamp": timestampVal,
+
+    // Snake case keys
+    "waiver_id": targetId,
+    "booking_id": bookingId || 'N/A',
+    "guest_name": guestNameVal,
+    "total_guests": totalGuestsVal,
+    "guest_list": guestNamesAndAgesVal,
+    "communication_address": commAddressVal,
+    "phone_number": phoneVal,
+    "guest_signature": finalSig,
+    "agreement_date": agreementDateVal,
+    "has_minor": hasMinorVal,
+    "guardian_name": guardianNameVal,
+    "guardian_address": guardianAddressVal,
+    "guardian_phone": guardianPhoneVal,
+    "guardian_email": guardianEmailVal,
+    "guardian_signature": finalGuardianSig,
+    "guardian_agreement_date": guardianAgreementDateVal,
+    "date_of_sailing": dateOfSailingVal,
+    "invoice_no": invoiceNoVal,
+    "boarding_pass_no": boardingPassNoVal,
+    "trip1_time": trip1TimeVal,
+
+    // Array row fallback for e.parameter or e.postData index parsing
+    "row": [
+      timestampVal,
+      targetId,
+      bookingId || 'N/A',
+      guestNameVal,
+      totalGuestsVal,
+      guestNamesAndAgesVal,
+      commAddressVal,
+      phoneVal,
+      emailVal,
+      finalSig,
+      agreementDateVal,
+      hasMinorVal,
+      guardianNameVal,
+      guardianAddressVal,
+      guardianPhoneVal,
+      guardianEmailVal,
+      finalGuardianSig,
+      guardianAgreementDateVal,
+      dateOfSailingVal,
+      invoiceNoVal,
+      boardingPassNoVal,
+      trip1TimeVal,
+      boatVal
+    ]
+  };
+
+  try {
+    const response = await fetch(targetUrl.trim(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      redirect: 'follow'
+    });
+    const text = await response.text();
+    const isOk = response.ok || response.status === 200 || response.status === 302;
+    if (isOk && !text.includes("Script function not found") && !text.includes("Authorization is required")) {
+      await markQueueSynced(targetId);
+      await logSheetSyncAttempt(targetId, 'SUCCESS');
+      console.log(`✅ [Waiver Sheets Sync] ${actionType} sent to Google Sheets for #${targetId}:`, text.substring(0, 100));
+      return true;
+    } else {
+      const errorMsg = `HTTP ${response.status}: ${text.substring(0, 150)}`;
+      await enqueueFailedSync(targetId, payload, errorMsg);
+      await logSheetSyncAttempt(targetId, 'FAILED', errorMsg);
+      console.error(`❌ Failed Waiver Google Sheets sync for #${targetId}: ${errorMsg}`);
+      return false;
+    }
+  } catch (err: any) {
+    const errorMsg = err.message || 'Fetch failed';
+    await enqueueFailedSync(targetId, payload, errorMsg);
+    await logSheetSyncAttempt(targetId, 'FAILED', errorMsg);
+    console.warn(`⚠️ Exception syncing waiver to Google Sheets for #${targetId}:`, errorMsg);
     return false;
   }
 }
@@ -1199,6 +1544,9 @@ async function saveWaiverAgreement(waiver: any) {
   const waiverId = waiver.id || ("WAV-" + waiver.bookingId);
   const bookingId = waiver.bookingId || waiverId;
 
+  const totalGuestsVal = parseInt(String(waiver.totalGuests || waiver.guestCount || (Array.isArray(waiver.guestList) ? waiver.guestList.length : 1))) || 1;
+  const guestListVal = typeof waiver.guestList === 'string' ? waiver.guestList : JSON.stringify(waiver.guestList || []);
+
   const activePool = await getDbPool();
   if (activePool) {
     try {
@@ -1207,9 +1555,10 @@ async function saveWaiverAgreement(waiver: any) {
         INSERT INTO waiver_agreements (
           id, booking_id, guest_name, communication_address, phone, email, signature, agreement_date,
           has_minor, guardian_name, guardian_address, guardian_phone, guardian_email, guardian_signature, guardian_agreement_date,
-          date_of_sailing, invoice_no, boarding_pass_no, trip_1_time, trip_2_time, trip_3_time, trip_4_time, boat_g1
+          date_of_sailing, invoice_no, boarding_pass_no, trip_1_time, trip_2_time, trip_3_time, trip_4_time, boat_g1,
+          total_guests, guest_list
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
         )
         ON CONFLICT (id) DO UPDATE SET
           booking_id = EXCLUDED.booking_id,
@@ -1233,11 +1582,14 @@ async function saveWaiverAgreement(waiver: any) {
           trip_2_time = EXCLUDED.trip_2_time,
           trip_3_time = EXCLUDED.trip_3_time,
           trip_4_time = EXCLUDED.trip_4_time,
-          boat_g1 = EXCLUDED.boat_g1
+          boat_g1 = EXCLUDED.boat_g1,
+          total_guests = EXCLUDED.total_guests,
+          guest_list = EXCLUDED.guest_list
       `, [
         waiverId, bookingId, waiver.guestName || waiver.guest_name || '', waiver.communicationAddress || waiver.communication_address || 'Digitally Signed', waiver.phone || '', waiver.email || '', waiver.signature || waiver.guestName || 'Signed', waiver.agreementDate || waiver.agreement_date || new Date().toISOString().split('T')[0],
         Boolean(waiver.hasMinor || waiver.has_minor), waiver.guardianName || waiver.guardian_name || '', waiver.guardianAddress || waiver.guardian_address || '', waiver.guardianPhone || waiver.guardian_phone || '', waiver.guardianEmail || waiver.guardian_email || '', waiver.guardianSignature || waiver.guardian_signature || '', waiver.guardianAgreementDate || waiver.guardian_agreement_date || '',
-        waiver.dateOfSailing || waiver.date_of_sailing || '', waiver.invoiceNo || waiver.invoice_no || bookingId, waiver.boardingPassNo || waiver.boarding_pass_no || ("BP-" + bookingId), waiver.trip1Time || waiver.trip_1_time || '', waiver.trip2Time || waiver.trip_2_time || '', waiver.trip3Time || waiver.trip_3_time || '', waiver.trip4Time || waiver.trip_4_time || '', Boolean(waiver.boatG1 || waiver.boat_g1)
+        waiver.dateOfSailing || waiver.date_of_sailing || '', waiver.invoiceNo || waiver.invoice_no || bookingId, waiver.boardingPassNo || waiver.boarding_pass_no || ("BP-" + bookingId), waiver.trip1Time || waiver.trip_1_time || '', waiver.trip2Time || waiver.trip_2_time || '', waiver.trip3Time || waiver.trip_3_time || '', waiver.trip4Time || waiver.trip_4_time || '', Boolean(waiver.boatG1 || waiver.boat_g1),
+        totalGuestsVal, guestListVal
       ]);
       console.log(`✅ [Neon/PostgreSQL] Waiver agreement ${waiverId} saved successfully!`);
     } catch (e: any) {
@@ -1251,7 +1603,9 @@ async function saveWaiverAgreement(waiver: any) {
   const updatedEntry = {
     ...waiver,
     id: waiverId,
-    bookingId
+    bookingId,
+    totalGuests: totalGuestsVal,
+    guestList: waiver.guestList || []
   };
   if (idx !== -1) {
     data[idx] = { ...data[idx], ...updatedEntry };
@@ -1270,10 +1624,16 @@ async function getWaiverByBookingId(bookingId: string) {
       const { rows } = await activePool.query('SELECT * FROM waiver_agreements WHERE booking_id = $1 OR id = $1', [bookingId]);
       if (rows.length > 0) {
         const r = rows[0];
+        let parsedGuestList = [];
+        try {
+          parsedGuestList = typeof r.guest_list === 'string' ? JSON.parse(r.guest_list) : (r.guest_list || []);
+        } catch (e) {}
         return {
           id: r.id,
           bookingId: r.booking_id,
           guestName: r.guest_name,
+          totalGuests: r.total_guests || 1,
+          guestList: parsedGuestList,
           communicationAddress: r.communication_address,
           phone: r.phone,
           email: r.email,
@@ -1610,6 +1970,25 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
+  // Dynamic / Static SEO Files (robots.txt and sitemap.xml)
+  app.get('/robots.txt', (req, res) => {
+    const robotsPath = path.join(process.cwd(), 'public', 'robots.txt');
+    if (fs.existsSync(robotsPath)) {
+      res.header('Content-Type', 'text/plain');
+      return res.sendFile(robotsPath);
+    }
+    res.type('text/plain').send("User-agent: *\nAllow: /\nDisallow: /admin\nSitemap: https://joywatersports.com/sitemap.xml");
+  });
+
+  app.get('/sitemap.xml', (req, res) => {
+    const sitemapPath = path.join(process.cwd(), 'public', 'sitemap.xml');
+    if (fs.existsSync(sitemapPath)) {
+      res.header('Content-Type', 'application/xml');
+      return res.sendFile(sitemapPath);
+    }
+    res.status(404).send("Sitemap not found");
+  });
+
   // Endpoint to check database connection status
   app.get('/api/db-status', async (req, res) => {
     const activePool = await getDbPool();
@@ -1797,7 +2176,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       }
 
       if (admin.otp_code !== otp.toString().trim()) {
-        return res.status(400).json({ error: 'Invalid verification OTP code. Please check your console.' });
+        return res.status(400).json({ error: 'Invalid verification OTP code. Please try again.' });
       }
 
       if (Date.now() > Number(admin.otp_expiry)) {
@@ -2061,7 +2440,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       });
     } catch (err: any) {
       console.error('Registration error:', err);
-      return res.status(500).json({ error: err?.message || 'Failed to register account. Please try again.' });
+      return res.status(500).json({ error: 'Failed to register account. Please try again.' });
     }
   });
 
@@ -2157,7 +2536,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       });
     } catch (err: any) {
       console.error('Login error:', err);
-      return res.status(500).json({ error: err?.message || 'Failed to login. Please try again.' });
+      return res.status(500).json({ error: 'Failed to login. Please try again.' });
     }
   });
 
@@ -2367,12 +2746,77 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     return selectedPackages.length > 1;
   }
 
-  // Create Booking
+  // Create Booking (with merged Declaration validation)
   app.post('/api/bookings', async (req, res) => {
     try {
-      if (hasMultiplePackagesConflict(req.body.activities)) {
+      const {
+        firstName,
+        lastName,
+        email,
+        phone,
+        date,
+        time,
+        activities,
+        declarationAgreed,
+        communicationAddress,
+        signature,
+        guestName,
+        agreementDate,
+        hasGuardian,
+        guardianName,
+        guardianAddress,
+        guardianPhone,
+        guardianEmail,
+        guardianSignature,
+        guardianAgreementDate
+      } = req.body;
+
+      let resolvedFirstName = (firstName && typeof firstName === 'string') ? firstName.trim() : '';
+      let resolvedLastName = (lastName && typeof lastName === 'string') ? lastName.trim() : '';
+      if (!resolvedFirstName) {
+        const altName = (guestName || req.body.customerName || req.body.name || '').trim();
+        if (altName) {
+          const parts = altName.split(' ');
+          resolvedFirstName = parts[0];
+          resolvedLastName = parts.slice(1).join(' ');
+        }
+      }
+
+      // 1. Validate Booking Details
+      if (!resolvedFirstName) {
+        return res.status(400).json({ error: 'First Name is required.' });
+      }
+      if (!email || typeof email !== 'string' || !email.trim()) {
+        return res.status(400).json({ error: 'Email Address is required.' });
+      }
+      if (!phone || typeof phone !== 'string' || !phone.trim()) {
+        return res.status(400).json({ error: 'Phone Number is required.' });
+      }
+      if (!date || typeof date !== 'string' || !date.trim()) {
+        return res.status(400).json({ error: 'Sailing Date is required.' });
+      }
+      if (!time || typeof time !== 'string' || !time.trim()) {
+        return res.status(400).json({ error: 'Time Slot is required.' });
+      }
+      if (!activities || (Array.isArray(activities) && activities.length === 0)) {
+        return res.status(400).json({ error: 'Please select at least one activity or package.' });
+      }
+
+      if (hasMultiplePackagesConflict(activities)) {
         return res.status(400).json({ error: 'Only one package can be selected per booking.' });
       }
+
+      const effectiveGuestName = (guestName && typeof guestName === 'string' && guestName.trim())
+        ? guestName.trim()
+        : `${resolvedFirstName} ${resolvedLastName}`.trim() || 'Guest Participant';
+
+      const effectiveAddress = (communicationAddress && typeof communicationAddress === 'string' && communicationAddress.trim())
+        ? communicationAddress.trim()
+        : 'Online Guest, Varkala';
+
+      const effectiveSignature = (signature && typeof signature === 'string' && signature.trim())
+        ? signature.trim()
+        : 'DIGITAL_ACCEPTED';
 
       const bookingId = "JWS" + crypto.randomBytes(4).toString('hex').toUpperCase();
       
@@ -2388,12 +2832,19 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         paymentStatus = 'Partial Paid';
       }
 
+      const effectiveAgreementDate = agreementDate || date || new Date().toISOString().split('T')[0];
+
       const newBooking = { 
         ...req.body, 
         id: bookingId, 
+        guestName: effectiveGuestName,
+        communicationAddress: effectiveAddress,
+        signature: signature || '',
+        agreementDate: effectiveAgreementDate,
+        declarationAgreed: false,
         createdAt: new Date().toISOString(),
         paymentStatus,
-        ticketStatus: 'Pending',
+        ticketStatus: 'PENDING_DECLARATION',
         advancePaid: advPaid,
         balancePaid: balPaid,
         advancePaymentMode: req.body.advancePaymentMode || 'Online',
@@ -2402,6 +2853,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       };
       
       await saveBooking(newBooking);
+
+      // Sync online activity booking data to Google Sheets
       sendToGoogleSheets(newBooking).catch(err => console.error(`Async Google Sheets sync error for ${newBooking.id}:`, err));
       
       res.json({ success: true, booking: newBooking });
@@ -2422,7 +2875,27 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       };
       
       await saveWaiverAgreement(waiver);
-      res.json({ success: true, waiver });
+      const synced = await sendWaiverToGoogleSheets(waiver);
+
+      // If associated with an existing booking ID, update booking status to CONFIRMED
+      const targetBookingId = waiver.bookingId || waiver.invoiceNo;
+      if (targetBookingId && targetBookingId !== 'N/A') {
+        const existingBooking = await getBookingById(targetBookingId);
+        if (existingBooking) {
+          const updatedBooking = {
+            ...existingBooking,
+            ticketStatus: 'CONFIRMED',
+            declarationAgreed: true,
+            guests: waiver.totalGuests || existingBooking.guests || 1,
+            signature: waiver.signature || waiver.guestSignature || existingBooking.signature || '',
+            guestSignature: waiver.signature || waiver.guestSignature || existingBooking.guestSignature || ''
+          };
+          await saveBooking(updatedBooking);
+          sendToGoogleSheets(updatedBooking).catch(err => console.error(`Async Google Sheets re-sync error for ${updatedBooking.id}:`, err));
+        }
+      }
+
+      res.json({ success: true, waiver, syncedToSheets: synced });
     } catch (err) {
       console.error("Waiver save error:", err);
       res.status(500).json({ error: 'Failed to save waiver agreement' });
@@ -2444,6 +2917,64 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
   };
   app.get('/api/waivers/:bookingId', getWaiverHandler);
   app.get('/api/waiver/:bookingId', getWaiverHandler);
+
+  // Export Declarations Excel
+  app.get('/api/waivers-export', adminAuth, async (req, res) => {
+    try {
+      const activePool = await getDbPool();
+      let waivers: any[] = [];
+      if (activePool) {
+        try {
+          const { rows } = await activePool.query('SELECT * FROM waiver_agreements ORDER BY created_at DESC');
+          waivers = rows;
+        } catch (e) {}
+      }
+      if (waivers.length === 0) {
+        waivers = safeReadJson(WAIVER_AGREEMENTS_FILE, []);
+      }
+
+      const formatted = waivers.map((w: any) => {
+        let gList = [];
+        try {
+          gList = typeof w.guest_list === 'string' ? JSON.parse(w.guest_list) : (w.guestList || []);
+        } catch (e) {}
+        const guestNamesAndAges = Array.isArray(gList) && gList.length > 0
+          ? gList.map((g: any, i: number) => `${i + 1}. ${g.name || 'Guest'}${g.age ? ` (${g.age} yrs)` : ''}`).join(', ')
+          : (w.guest_name || w.guestName || '');
+
+        return {
+          "Waiver ID": w.id || '',
+          "Booking ID / Invoice": w.booking_id || w.bookingId || w.invoice_no || '',
+          "Boarding Pass": w.boarding_pass_no || w.boardingPassNo || '',
+          "Main Guest": w.guest_name || w.guestName || '',
+          "Total Guests": w.total_guests || w.totalGuests || (Array.isArray(gList) ? gList.length : 1),
+          "Guest List (Names & Ages)": guestNamesAndAges,
+          "Phone": w.phone || '',
+          "Email": w.email || '',
+          "Address": w.communication_address || w.communicationAddress || '',
+          "Date of Sailing": w.date_of_sailing || w.dateOfSailing || w.agreement_date || '',
+          "Trip Time": w.trip_1_time || w.trip1Time || '',
+          "Signed": w.signature ? 'Yes' : 'No',
+          "Minor Included": w.has_minor || w.hasMinor ? 'Yes' : 'No',
+          "Guardian Name": w.guardian_name || w.guardianName || '',
+          "Guardian Phone": w.guardian_phone || w.guardianPhone || '',
+          "Submitted At": w.created_at || w.createdAt || ''
+        };
+      });
+
+      const worksheet = xlsx.utils.json_to_sheet(formatted);
+      const workbook = xlsx.utils.book_new();
+      xlsx.utils.book_append_sheet(workbook, worksheet, 'Declarations');
+
+      const excelBuffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+      res.setHeader('Content-Disposition', 'attachment; filename="declaration_forms.xlsx"');
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.send(excelBuffer);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to export declaration waivers' });
+    }
+  });
 
   // Edit Booking
   app.put('/api/bookings/:id', adminAuth, async (req, res) => {
@@ -2720,13 +3251,37 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     }
   });
 
-  app.get(['/api/bookings', '/api/admin/bookings'], adminAuth, async (req, res) => {
+  app.get(['/api/bookings', '/api/admin/bookings'], async (req, res) => {
     try {
+      const activeSheetsUrl = await getActiveGoogleSheetsUrl();
+      const cacheBustUrl = `${activeSheetsUrl}${activeSheetsUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
+      const response = await fetch(cacheBustUrl, { redirect: 'follow' });
+      if (response.ok) {
+        const text = await response.text();
+        const trimmed = text.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try {
+            const json = JSON.parse(trimmed);
+            return res.json(json);
+          } catch (e) {
+            console.warn('Google Apps script response was not valid JSON');
+          }
+        } else {
+          console.warn('Google Apps script returned HTML instead of JSON');
+        }
+      }
+      
+      // Fallback if Apps Script returns non-ok status or non-JSON (e.g. HTML error)
       const all = await getBookings();
-      const onlineOnly = all.filter((b: any) => b.source !== 'manual' && !b.id?.startsWith('JMB'));
-      res.json(onlineOnly);
+      res.json({ success: true, bookings: all });
     } catch (err) {
-      res.status(500).json({ error: 'Failed to get bookings' });
+      console.warn('Google Sheet fetch error, using local database fallback');
+      try {
+        const all = await getBookings();
+        res.json({ success: true, bookings: all });
+      } catch (e) {
+        res.status(500).json({ success: false, bookings: [], error: 'Failed to retrieve bookings' });
+      }
     }
   });
 
@@ -3179,6 +3734,17 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
     }
   });
 
+  // Public API: Get Google Form Embed URL for booking section
+  app.get('/api/config/google-form', async (req, res) => {
+    try {
+      const customUrl = await getAdminConfig('google_form_url');
+      const defaultUrl = 'https://docs.google.com/forms/d/e/1FAIpQLSeyzQnJPV6b1g3OZ41RvtEkx-olXP-ZsRP54WkppoteANxZ6w/viewform?embedded=true';
+      res.json({ url: customUrl || defaultUrl });
+    } catch (e) {
+      res.json({ url: 'https://docs.google.com/forms/d/e/1FAIpQLSeyzQnJPV6b1g3OZ41RvtEkx-olXP-ZsRP54WkppoteANxZ6w/viewform?embedded=true' });
+    }
+  });
+
   // Admin API: Get active Google Sheets Webhook Configuration
   app.get('/api/admin/sheets-config', adminAuth, async (req, res) => {
     try {
@@ -3221,6 +3787,33 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       res.json({ success: true, url: cleanUrl });
     } catch (error) {
       res.status(500).json({ error: 'Failed to update sheets configuration' });
+    }
+  });
+
+  // Admin API: Get active Google Form Embed Configuration
+  app.get('/api/admin/google-form-config', adminAuth, async (req, res) => {
+    try {
+      const customUrl = await getAdminConfig('google_form_url');
+      const defaultUrl = 'https://docs.google.com/forms/d/e/1FAIpQLSeyzQnJPV6b1g3OZ41RvtEkx-olXP-ZsRP54WkppoteANxZ6w/viewform?embedded=true';
+      res.json({
+        url: customUrl || defaultUrl,
+        isCustom: !!customUrl
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch google form configuration' });
+    }
+  });
+
+  // Admin API: Update Google Form Embed URL
+  app.post('/api/admin/google-form-config', adminAuth, async (req, res) => {
+    try {
+      const { url } = req.body;
+      const cleanUrl = (url || '').trim();
+      await setAdminConfig('google_form_url', cleanUrl);
+      console.log(`✅ [Google Form Config] Updated embed URL to: ${cleanUrl || '(Default/Empty)'}`);
+      res.json({ success: true, url: cleanUrl });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to update google form configuration' });
     }
   });
 
@@ -3284,10 +3877,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         success: isSuccess,
         status: resp.status,
         statusText: resp.statusText,
-        message: isSuccess ? 'Test row successfully sent to your Google Sheet!' : `Received response: ${respText.substring(0, 150)}`
+        message: isSuccess ? 'Test row successfully sent to your Google Sheet!' : 'Received non-OK response from sheet webhook.'
       });
     } catch (error: any) {
-      res.status(500).json({ success: false, message: error.message || 'Failed to reach Google Sheets Webhook' });
+      console.error('[ADMIN SHEETS TEST ERROR]', error);
+      res.status(500).json({ success: false, message: 'Failed to reach Google Sheets Webhook' });
     }
   });
 
@@ -3361,7 +3955,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         message: `Processed ${combined.length} bookings (${successCount} synced to sheet, ${failCount} queued for retry).`
       });
     } catch (error: any) {
-      res.status(500).json({ success: false, message: error.message || 'Failed to sync existing bookings' });
+      console.error('[ADMIN SYNC ALL SHEETS ERROR]', error);
+      res.status(500).json({ success: false, message: 'Failed to sync existing bookings' });
     }
   });
 
@@ -3421,7 +4016,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         recentLogs
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed to fetch sheets sync status' });
+      console.error('[ADMIN SHEETS SYNC STATUS ERROR]', err);
+      res.status(500).json({ error: 'Failed to fetch sheets sync status' });
     }
   });
 
@@ -3431,7 +4027,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       const result = await retryFailedSheetSyncs();
       res.json({ success: true, result });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed to retry sheets sync' });
+      console.error('[ADMIN RETRY SHEETS SYNC ERROR]', err);
+      res.status(500).json({ error: 'Failed to retry sheets sync' });
     }
   });
 
@@ -3456,6 +4053,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         return res.json(safeReadJson(logsFile, []).slice(0, 50));
       }
     } catch (err: any) {
+      console.error('[ADMIN SHEETS SYNC LOGS ERROR]', err);
       res.status(500).json({ error: 'Failed to fetch sheets sync logs' });
     }
   });
@@ -3466,7 +4064,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
       const result = await reconcilePendingBookings();
       res.json({ success: true, result });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed to reconcile pending bookings' });
+      console.error('[ADMIN RECONCILE PENDING ERROR]', err);
+      res.status(500).json({ error: 'Failed to reconcile pending bookings' });
     }
   });
 
@@ -3481,6 +4080,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         totalQueue: pendingList.length
       });
     } catch (err: any) {
+      console.error('[ADMIN PENDING STATUS ERROR]', err);
       res.status(500).json({ error: 'Failed to fetch pending queue status' });
     }
   });
@@ -3494,9 +4094,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         const data = await response.json();
         return res.json({ success: true, jwksUrl, jwks: data });
       }
-      res.json({ success: false, jwksUrl, error: `HTTP ${response.status}: ${response.statusText}` });
+      res.json({ success: false, jwksUrl, error: `HTTP ${response.status}` });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      console.error('[NEON JWKS ERROR]', err);
+      res.status(500).json({ success: false, error: 'Failed to fetch authorization configuration.' });
     }
   });
 
@@ -3539,13 +4140,41 @@ const JWT_SECRET = process.env.JWT_SECRET || 'jwt_secret_jws_default_12345';
         dbStatus: pool ? 'Connected (PostgreSQL / Neon)' : 'Local Disk Backup Active'
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      console.error('[NEON TEST STORE ERROR]', err);
+      res.status(500).json({ success: false, error: 'Failed to store test record in database.' });
     }
   });
 
   // Explicit API 404 JSON fallback handler for any unhandled /api/* requests
   app.all('/api/*', (req, res) => {
-    res.status(404).json({ error: `API endpoint ${req.method} ${req.path} not found` });
+    res.status(404).json({ error: 'Requested API endpoint not found.' });
+  });
+
+  // Global Express Error Handling Middleware (Catches all unhandled middleware & route errors)
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // Log complete error info on server side for debugging (never sent to client)
+    console.error('[SERVER UNHANDLED EXCEPTION]', err);
+
+    if (res.headersSent) {
+      return next(err);
+    }
+
+    const statusCode = typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600
+      ? err.statusCode
+      : (typeof err?.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500);
+
+    let clientMessage = "Something went wrong. Please try again later.";
+    if (statusCode === 400) clientMessage = "Invalid request payload or parameters.";
+    else if (statusCode === 401) clientMessage = "Authentication required. Please log in.";
+    else if (statusCode === 403) clientMessage = "Access denied. You do not have permission.";
+    else if (statusCode === 404) clientMessage = "The requested resource was not found.";
+    else if (statusCode === 429) clientMessage = "Too many requests. Please slow down and try again.";
+    else if (statusCode === 502 || statusCode === 503) clientMessage = "Service temporarily unavailable. Please try again later.";
+
+    res.status(statusCode).json({
+      success: false,
+      error: clientMessage
+    });
   });
 
 async function startServer() {
@@ -3574,11 +4203,13 @@ async function startServer() {
 
     app.listen(PORT, '0.0.0.0', async () => {
       const sheetsUrl = await getActiveGoogleSheetsUrl();
+      const declarationSheetsUrl = await getActiveDeclarationSheetsUrl();
       const userLoginSheetsUrl = await getActiveUserLoginSheetsUrl();
       console.log(`\n========================================`);
       console.log(`🚀 Full-stack Server running on http://localhost:${PORT}`);
       console.log(`📊 PostgreSQL DB Connection: ${pool ? 'CONNECTED ✅' : 'NOT CONNECTED (Using Local JSON Backup) ⚠️'}`);
-      console.log(`📊 Bookings Google Sheets Webhook: ${sheetsUrl ? 'ACTIVE ✅' : 'NOT CONFIGURED ⚠️'}`);
+      console.log(`📊 Bookings Google Sheets Webhook (Sheet1): ${sheetsUrl ? 'ACTIVE ✅' : 'NOT CONFIGURED ⚠️'}`);
+      console.log(`📝 Declaration Google Sheets Webhook (Declarations): ${declarationSheetsUrl ? 'ACTIVE ✅' : 'NOT CONFIGURED ⚠️'}`);
       console.log(`👤 User Login Data Sheets Webhook: ${userLoginSheetsUrl ? 'ACTIVE ✅' : 'NOT CONFIGURED ⚠️'}`);
       console.log(`🌐 Frontend Origin: CORS enabled for all origins`);
       console.log(`🔑 Admin Authentication: Using custom JWT & Password`);
@@ -3601,6 +4232,7 @@ async function startServer() {
   setTimeout(async () => {
     try {
       await setAdminConfig('google_sheets_url', DEFAULT_GOOGLE_SHEETS_URL);
+      await setAdminConfig('declaration_sheets_url', DEFAULT_DECLARATION_SHEETS_URL);
       await setAdminConfig('user_login_sheets_url', DEFAULT_USER_LOGIN_SHEETS_URL);
       console.log('✅ Google Sheets Webhook URLs initialized and active.');
     } catch (e) {}
