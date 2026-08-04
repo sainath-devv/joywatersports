@@ -138,8 +138,13 @@ CREATE TABLE IF NOT EXISTS waiver_agreements (
   trip_3_time VARCHAR(255),
   trip_4_time VARCHAR(255),
   boat_g1 BOOLEAN DEFAULT FALSE,
+  total_guests INTEGER DEFAULT 1,
+  guest_list TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE waiver_agreements ADD COLUMN IF NOT EXISTS total_guests INTEGER DEFAULT 1;
+ALTER TABLE waiver_agreements ADD COLUMN IF NOT EXISTS guest_list TEXT;
 
 CREATE TABLE IF NOT EXISTS sheet_sync_queue (
   id SERIAL PRIMARY KEY,
