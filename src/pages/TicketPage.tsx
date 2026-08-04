@@ -6,6 +6,7 @@ import { formatTime } from '../utils/constants';
 import Footer from '../components/common/Footer';
 import MinimalistLoader from '../components/common/MinimalistLoader';
 import { downloadTicketPDF, getTicketPDFBlob, formatActivitiesList } from '../utils/generateTicketPDF';
+import { formatSafeErrorMessage } from '../lib/errorHandler';
 
 export default function TicketPage() {
   const { id } = useParams();
@@ -26,9 +27,25 @@ export default function TicketPage() {
           throw new Error('Ticket not found or invalid ID');
         }
         const data = await res.json();
+
+        // Check if waiver declaration exists for this booking ID
+        try {
+          const waiverRes = await fetch(`/api/waivers/${id}`);
+          if (waiverRes.ok) {
+            const waiverData = await waiverRes.json();
+            if (waiverData && !waiverData.error) {
+              data.declarationAgreed = true;
+              data.ticketStatus = 'CONFIRMED';
+              data.waiverDetails = waiverData;
+            }
+          }
+        } catch (e) {
+          console.error("Waiver check error:", e);
+        }
+
         setBooking(data);
       } catch (err: any) {
-        setError(err.message || 'Error occurred while loading ticket.');
+        setError(formatSafeErrorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -139,6 +156,53 @@ export default function TicketPage() {
                   </span>
                 )}
               </div>
+            </div>
+
+            {/* Declaration Authentication Status Banner */}
+            <div className="mt-4">
+              {booking.ticketStatus === 'CONFIRMED' || booking.declarationAgreed ? (
+                <div className="p-3 bg-emerald-50 border border-emerald-200/90 rounded-2xl flex items-center justify-between gap-3 text-emerald-950 shadow-2xs">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                      <Shield size={18} />
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
+                        <span>✓ ONLINE BOOKING CONFIRMED</span>
+                      </p>
+                      <p className="text-[11px] font-semibold text-emerald-700">
+                        Liability Declaration Signed & Authenticated
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] bg-emerald-600 text-white font-black px-2.5 py-1 rounded-full uppercase tracking-wider shrink-0">
+                    VERIFIED
+                  </span>
+                </div>
+              ) : (
+                <div className="p-3 bg-amber-50 border border-amber-200/90 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-amber-950 shadow-2xs">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                      <FileText size={18} />
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase tracking-wider text-amber-900">
+                        DECLARATION FORM REQUIRED
+                      </p>
+                      <p className="text-[11px] font-semibold text-amber-700">
+                        Complete your waiver to confirm online booking.
+                      </p>
+                    </div>
+                  </div>
+                  <Link
+                    to={`/declaration?bookingId=${booking.id}&name=${encodeURIComponent((booking.firstName + ' ' + (booking.lastName || '')).trim())}&phone=${encodeURIComponent(booking.phone || '')}&date=${encodeURIComponent(booking.date || '')}&guests=${booking.guests || 1}`}
+                    className="w-full sm:w-auto bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+                  >
+                    <span>Sign Declaration</span>
+                    <ArrowRight size={13} />
+                  </Link>
+                </div>
+              )}
             </div>
 
             {/* Dashed Perforation Line #1 */}
