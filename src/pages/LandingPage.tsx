@@ -2,23 +2,25 @@ import React, { useRef, useState, useMemo, useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { 
-  Plane, ArrowRight, Check, Camera, Video, 
+  Plane, ArrowRight, ArrowLeft, Check, Camera, Video, 
   Aperture, LogOut, User, Menu, X, ShieldCheck, Award, Heart, Search, FileText, ExternalLink,
-  Ticket, Clock, CheckCircle, AlertCircle, Calendar, Users
+  Ticket, Clock, CheckCircle, AlertCircle, Calendar, Users, Send, Phone, Mail, MessageSquare, CheckSquare, PhoneCall, ChevronDown
 } from 'lucide-react';
 import { parsePhoneNumber } from 'libphonenumber-js';
 import { ACTIVITY_PRICES, EXPERIENCES, formatTime } from '../utils/constants';
 import Footer from '../components/common/Footer';
 import VideoGallerySection from '../components/common/VideoGallerySection';
-import UserLogin from '../components/user/UserLogin';
 import LazySection from '../components/common/LazySection';
 import HeroVectorVideo from '../components/common/HeroVectorVideo';
-import { useAuth } from '../context/AuthContext';
+import { formatSafeErrorMessage } from '../lib/errorHandler';
+import SignaturePad from '../components/common/SignaturePad';
+import SEOHead, { joyWaterSportsBusinessSchema } from '../components/common/SEOHead';
 
 export default function LandingPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isReviewsPaused, setIsReviewsPaused] = useState(false);
 
   const [formData, setFormData] = useState({
     firstName: "",
@@ -31,44 +33,52 @@ export default function LandingPage() {
     activities: [] as string[],
     specialRequest: ""
   });
-  const [bookingStep, setBookingStep] = useState(1);
-  const [waiverData, setWaiverData] = useState({
+  const [declarationData, setDeclarationData] = useState({
     guestName: "",
     communicationAddress: "",
-    phone: "",
-    email: "",
+    agreementDate: new Date().toISOString().split('T')[0],
     signature: "",
-    agreementDate: "",
-    hasMinor: false,
+    declarationAgreed: false,
+    hasGuardian: false,
     guardianName: "",
     guardianAddress: "",
     guardianPhone: "",
     guardianEmail: "",
     guardianSignature: "",
-    guardianAgreementDate: "",
-    dateOfSailing: "",
-    invoiceNo: "",
-    boardingPassNo: "",
-    trip1Time: "",
-    trip2Time: "",
-    trip3Time: "",
-    trip4Time: "",
-    boatG1: false
+    guardianAgreementDate: new Date().toISOString().split('T')[0]
   });
+  const [bookingStep, setBookingStep] = useState<1 | 2>(1);
+  const [fieldErrors, setFieldErrors] = useState<{ [key: string]: string }>({});
 
-  useEffect(() => {
-    if (bookingStep === 2) {
-      setWaiverData(prev => ({
-        ...prev,
-        guestName: prev.guestName || `${formData.firstName} ${formData.lastName}`.trim(),
-        phone: prev.phone || formData.phone,
-        email: prev.email || formData.email,
-        dateOfSailing: prev.dateOfSailing || formData.date,
-        agreementDate: prev.agreementDate || formData.date || new Date().toISOString().split('T')[0],
-        guardianAgreementDate: prev.guardianAgreementDate || formData.date || new Date().toISOString().split('T')[0],
-      }));
+  const isStep1Valid = useMemo(() => {
+    const hasFirstName = formData.firstName.trim().length > 0;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const hasValidEmail = emailRegex.test(formData.email.trim());
+    const digitsOnly = (formData.phone || '').replace(/\D/g, '');
+    const hasValidPhone = digitsOnly.length >= 10 && digitsOnly.length <= 15;
+    const hasDate = Boolean(formData.date);
+    const hasTime = Boolean(formData.time);
+    const hasActivities = formData.activities.length > 0;
+    return hasFirstName && hasValidEmail && hasValidPhone && hasDate && hasTime && hasActivities;
+  }, [formData]);
+
+  const isStep2Valid = useMemo(() => {
+    const effectiveGuestName = declarationData.guestName.trim() || `${formData.firstName} ${formData.lastName}`.trim();
+    const hasGuestName = effectiveGuestName.length > 0;
+    const hasSignature = Boolean(declarationData.signature);
+    const hasAgreed = declarationData.declarationAgreed === true;
+
+    let guardianValid = true;
+    if (declarationData.hasGuardian) {
+      guardianValid = declarationData.guardianName.trim().length > 0 && Boolean(declarationData.guardianSignature);
     }
-  }, [bookingStep, formData]);
+
+    return hasGuestName && hasSignature && hasAgreed && guardianValid;
+  }, [formData, declarationData]);
+
+  const isFormValid = useMemo(() => {
+    return isStep1Valid && isStep2Valid;
+  }, [isStep1Valid, isStep2Valid]);
 
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -77,25 +87,120 @@ export default function LandingPage() {
   const [scrolledToBottom, setScrolledToBottom] = useState(false);
   const [agreedToWaiver, setAgreedToWaiver] = useState(false);
 
-  // Centralized Authentication State
-  const { user, isLoggedIn, logout: authLogout } = useAuth();
-  const userName = user?.name || (user?.firstName ? `${user.firstName} ${user.lastName || ''}`.trim() : '') || 'User';
-  const userEmail = user?.email || user?.phone || '';
-  const [showUserMenu, setShowUserMenu] = useState(false);
-  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  // Direct Booking & Enquiry Form State
+  const [enquiryName, setEnquiryName] = useState('');
+  const [enquiryEmail, setEnquiryEmail] = useState('');
+  const [enquiryPhone, setEnquiryPhone] = useState('');
+  const [enquiryActivities, setEnquiryActivities] = useState<string[]>(['Parasailing']);
+  const [enquiryMessage, setEnquiryMessage] = useState('');
+  const [isEnquirySubmitting, setIsEnquirySubmitting] = useState(false);
+  const [showContactPopup, setShowContactPopup] = useState(false);
+  const [submittedEnquiry, setSubmittedEnquiry] = useState<any>(null);
 
-  // Sync user details into form data automatically when logged in
-  useEffect(() => {
-    if (user) {
-      setFormData(prev => ({
-        ...prev,
-        firstName: prev.firstName || user.firstName || '',
-        lastName: prev.lastName || user.lastName || '',
-        email: prev.email || user.email || '',
-        phone: prev.phone || user.phone || ''
-      }));
+  // Activity list with pricing
+  const ACTIVITY_OPTIONS = [
+    { id: 'PARASAILING', name: 'Parasailing', price: 2500, tag: 'High Thrill' },
+    { id: 'JET SKI', name: 'Jet Ski', price: 700, tag: 'Speed' },
+    { id: 'BANANA BOAT', name: 'Banana Boat', price: 500, tag: 'Group Fun' },
+    { id: 'SPEED BOAT', name: 'Speed Boat', price: 500, tag: 'Family Favorite' },
+    { id: 'FLYING FISH', name: 'Flying Fish', price: 600, tag: 'High Thrill' },
+    { id: 'CRAZY SOFA', name: 'Crazy Sofa', price: 500, tag: 'Bouncy Ride' },
+    { id: 'DOUGHNUT BOAT', name: 'Doughnut Boat', price: 500, tag: 'Spin & Splash' },
+    { id: 'ATV', name: 'ATV Beach Ride', price: 300, tag: 'Land Ride' },
+  ];
+
+  const toggleActivity = (actName: string) => {
+    setEnquiryActivities(prev => {
+      if (prev.includes(actName)) {
+        const remaining = prev.filter(a => a !== actName);
+        return remaining.length === 0 ? ['Parasailing'] : remaining;
+      } else {
+        return [...prev, actName];
+      }
+    });
+  };
+
+  // Centralized State
+
+
+  const handleEnquirySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enquiryName.trim() || !enquiryPhone.trim()) {
+      alert('Please enter your Name and Mobile Number.');
+      return;
     }
-  }, [user]);
+    setIsEnquirySubmitting(true);
+
+    const guestsNum = parseInt(formData.guests) || 1;
+    const totalCalculatedAmt = enquiryActivities.reduce((sum, act) => {
+      const found = ACTIVITY_OPTIONS.find(a => a.name === act || a.id === act);
+      return sum + (found ? found.price : 500);
+    }, 0) * guestsNum;
+
+    const chosenDate = formData.date || new Date().toISOString().split('T')[0];
+    const chosenTime = formData.time ? formatTime(formData.time) : '09:00 AM';
+
+    const payload = {
+      firstName: enquiryName.trim(),
+      lastName: '',
+      email: enquiryEmail.trim() || 'notprovided@joywatersports.com',
+      phone: enquiryPhone.trim(),
+      activities: enquiryActivities.length > 0 ? enquiryActivities : ['Parasailing'],
+      specialRequest: enquiryMessage.trim(),
+      totalAmount: totalCalculatedAmt,
+      date: chosenDate,
+      time: chosenTime,
+      guests: guestsNum
+    };
+
+    try {
+      const res = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      const bookingId = data?.booking?.id || 'JWS-ENQ-' + Math.floor(1000 + Math.random() * 9000);
+
+      const message = `🌊 *NEW BOOKING RESERVATION* 🌊\n\n` +
+                      `🆔 *Booking ID:* ${bookingId}\n` +
+                      `👤 *Name:* ${enquiryName.trim()}\n` +
+                      `📞 *Phone:* ${enquiryPhone.trim()}\n` +
+                      `📧 *Email:* ${enquiryEmail.trim() || 'N/A'}\n` +
+                      `📅 *Date:* ${chosenDate}\n` +
+                      `⏰ *Time Slot:* ${chosenTime}\n` +
+                      `👥 *Guests:* ${guestsNum}\n` +
+                      `🏄 *Activities:* ${payload.activities.join(", ")}\n` +
+                      `💰 *Total Amount:* ₹${totalCalculatedAmt.toLocaleString('en-IN')}\n` +
+                      `📝 *Special Request:* ${enquiryMessage.trim() || "None"}\n`;
+
+      const whatsappUrl = `https://wa.me/919025286044?text=${encodeURIComponent(message)}`;
+
+      setSubmittedEnquiry({
+        ...payload,
+        bookingId,
+        whatsappUrl
+      });
+    } catch (err) {
+      const bookingId = 'JWS-ENQ-' + Math.floor(1000 + Math.random() * 9000);
+      const message = `🌊 *NEW BOOKING RESERVATION* 🌊\n\n` +
+                      `🆔 *Booking ID:* ${bookingId}\n` +
+                      `👤 *Name:* ${enquiryName.trim()}\n` +
+                      `📞 *Phone:* ${enquiryPhone.trim()}\n` +
+                      `📅 *Date:* ${chosenDate}\n` +
+                      `🏄 *Activities:* ${payload.activities.join(", ")}\n` +
+                      `💰 *Total Amount:* ₹${totalCalculatedAmt.toLocaleString('en-IN')}\n`;
+      const whatsappUrl = `https://wa.me/919025286044?text=${encodeURIComponent(message)}`;
+      setSubmittedEnquiry({
+        ...payload,
+        bookingId,
+        whatsappUrl
+      });
+    } finally {
+      setIsEnquirySubmitting(false);
+      setShowContactPopup(true);
+    }
+  };
 
   // Customer Booking Lookup State
   const [isLookupOpen, setIsLookupOpen] = useState(false);
@@ -122,7 +227,7 @@ export default function LandingPage() {
       }
       setLookupResults(data.bookings || []);
     } catch (err: any) {
-      setLookupError(err.message || 'Failed to search booking details.');
+      setLookupError(formatSafeErrorMessage(err));
     } finally {
       setLookupLoading(false);
     }
@@ -138,13 +243,11 @@ export default function LandingPage() {
   };
 
   const handleOpenAccountModal = (queryOverride?: string) => {
-    setShowUserMenu(false);
     setMobileMenuOpen(false);
     setIsLookupOpen(true);
 
-    const savedPhone = user?.phone || localStorage.getItem('userPhone') || formData.phone || '';
-    const savedEmail = user?.email || localStorage.getItem('userEmail') || userEmail || '';
-    const initialQuery = queryOverride || savedPhone || savedEmail || lookupInput || '';
+    const savedPhone = localStorage.getItem('userPhone') || formData.phone || '';
+    const initialQuery = queryOverride || savedPhone || lookupInput || '';
 
     if (initialQuery && initialQuery.trim()) {
       setLookupInput(initialQuery.trim());
@@ -155,30 +258,9 @@ export default function LandingPage() {
     }
   };
 
-  const handleLoginSuccess = () => {
-    setIsLoginOpen(false);
-  };
-
-  useEffect(() => {
-    if (searchParams.get('login') === 'true') {
-      setIsLoginOpen(true);
-      setSearchParams(prev => {
-        if (!prev.has('login')) return prev;
-        const next = new URLSearchParams(prev);
-        next.delete('login');
-        return next;
-      }, { replace: true });
-    }
-  }, [searchParams.get('login')]);
-
   useEffect(() => {
     document.title = "Joy Water Sports | Premium Adventures in Varkala";
   }, []);
-
-  const handleLogout = async () => {
-    await authLogout();
-    setShowUserMenu(false);
-  };
 
   useEffect(() => {
     const rawBook = searchParams.get('book');
@@ -226,131 +308,125 @@ export default function LandingPage() {
     setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
-  const isPackageOption = (act: string) => {
-    if (!act) return false;
-    return act === 'PACKAGE 2500' || act === 'OVERALL';
-  };
-
   const handleActivityToggle = (activity: string) => {
     setFormData(prev => {
       const active = prev.activities.includes(activity);
-      const isPkg = isPackageOption(activity);
-      
       if (active) {
         return {
           ...prev,
           activities: prev.activities.filter(a => a !== activity)
         };
       } else {
-        if (isPkg) {
-          // Selecting a package replaces any current selection with just this package
-          return {
-            ...prev,
-            activities: [activity]
-          };
-        } else {
-          // Selecting an individual activity removes any package and adds this activity
-          return {
-            ...prev,
-            activities: [...prev.activities.filter(a => !isPackageOption(a)), activity]
-          };
-        }
+        return {
+          ...prev,
+          activities: [...prev.activities, activity]
+        };
       }
     });
   };
 
-  const handleWaiverChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value, type } = e.target;
-    if (type === 'checkbox') {
-      const checked = (e.target as HTMLInputElement).checked;
-      setWaiverData(prev => ({ ...prev, [name]: checked }));
-    } else {
-      setWaiverData(prev => ({ ...prev, [name]: value }));
-    }
-  };
-
-  const handleWaiverScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const target = e.currentTarget;
-    const isAtBottom = target.scrollHeight - target.scrollTop <= target.clientHeight + 60;
-    if (isAtBottom) {
-      setScrolledToBottom(true);
-    }
-  };
-
   const validateStep1 = () => {
-    if (formData.activities.length === 0) {
-      setErrorMessage("Please select at least one activity/package.");
-      return false;
-    }
+    const errors: { [key: string]: string } = {};
 
     if (!formData.firstName.trim()) {
-      setErrorMessage("Please enter your first name.");
-      return false;
+      errors.firstName = "First Name is required.";
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(formData.email)) {
-      setErrorMessage("Please enter a valid email address.");
-      return false;
+    if (!formData.email.trim()) {
+      errors.email = "Email address is required.";
+    } else if (!emailRegex.test(formData.email.trim())) {
+      errors.email = "Please enter a valid email address.";
     }
 
     const digitsOnly = (formData.phone || '').replace(/\D/g, '');
-    if (digitsOnly.length < 10 || digitsOnly.length > 15) {
-      setErrorMessage("Please enter a valid 10-digit mobile phone number.");
-      return false;
+    if (!formData.phone.trim()) {
+      errors.phone = "Phone number is required.";
+    } else if (digitsOnly.length < 10 || digitsOnly.length > 15) {
+      errors.phone = "Please enter a valid 10-digit phone number.";
     }
 
     if (!formData.date) {
-      setErrorMessage("Please choose a date.");
-      return false;
+      errors.date = "Sailing date is required.";
     }
 
     if (!formData.time) {
-      setErrorMessage("Please choose a time slot.");
-      return false;
+      errors.time = "Time slot is required.";
     }
 
-    if (formData.time) {
-      const [hours, minutes] = formData.time.split(':').map(Number);
-      if (hours < 9 || (hours >= 17 && minutes > 0) || hours > 17) {
-        setErrorMessage("Please select a time between 09:00 AM and 05:00 PM.");
-        return false;
+    if (formData.activities.length === 0) {
+      errors.activities = "Please select at least one activity.";
+    }
+
+    return errors;
+  };
+
+  const handleNextStep = () => {
+    const errors = validateStep1();
+    setFieldErrors(errors);
+
+    if (Object.keys(errors).length > 0) {
+      const firstErrorKey = Object.keys(errors)[0];
+      const element = document.getElementById(`field-${firstErrorKey}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const input = element.querySelector('input, select, textarea') as HTMLElement;
+        if (input) input.focus();
+      }
+      return;
+    }
+
+    setFieldErrors({});
+    setDeclarationData(prev => ({
+      ...prev,
+      guestName: prev.guestName || `${formData.firstName} ${formData.lastName}`.trim()
+    }));
+    setBookingStep(2);
+    document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const validateAndGetErrors = () => {
+    const errors = validateStep1();
+
+    const effectiveGuestName = declarationData.guestName.trim() || `${formData.firstName} ${formData.lastName}`.trim();
+    if (!effectiveGuestName) {
+      errors.guestName = "Guest name is required for declaration.";
+    }
+
+    if (!declarationData.signature) {
+      errors.signature = "Guest signature is required.";
+    }
+
+    if (!declarationData.declarationAgreed) {
+      errors.declarationAgreed = "You must accept the liability release agreement.";
+    }
+
+    if (declarationData.hasGuardian) {
+      if (!declarationData.guardianName.trim()) {
+        errors.guardianName = "Guardian name is required.";
+      }
+      if (!declarationData.guardianSignature) {
+        errors.guardianSignature = "Guardian signature is required.";
       }
     }
 
-    setErrorMessage("");
-    return true;
-  };
-
-  const validateStep2 = () => {
-    return true;
+    return errors;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!isLoggedIn) {
-      setErrorMessage("Please log in or register to make a booking reservation.");
-      setIsLoginOpen(true);
-      return;
-    }
 
-    if (bookingStep === 1) {
-      if (validateStep1()) {
-        setBookingStep(2);
-        // Scroll to the booking form top smoothly
-        document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth' });
+    // Check errors
+    const step1Errors = validateStep1();
+    if (Object.keys(step1Errors).length > 0) {
+      setFieldErrors(step1Errors);
+      const firstErrorKey = Object.keys(step1Errors)[0];
+      const element = document.getElementById(`field-${firstErrorKey}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const input = element.querySelector('input, select, textarea') as HTMLElement;
+        if (input) input.focus();
       }
-      return;
-    }
-
-    // We are on step 2 (Waiver Signing)
-    if (!validateStep2()) {
-      return;
-    }
-
-    if (!agreedToWaiver) {
-      setErrorMessage("Please check the box confirming you read and agree to the Liability Waiver.");
       return;
     }
 
@@ -365,12 +441,20 @@ export default function LandingPage() {
       }
     } catch (error) {}
 
+    const payload = {
+      ...formData,
+      phone: parsedPhone,
+      totalAmount,
+      guestName: `${formData.firstName} ${formData.lastName}`.trim(),
+      ticketStatus: 'PENDING_DECLARATION'
+    };
+
     try {
-      // 1. Submit the main booking
+      // Submit the main booking
       const bResponse = await fetch('/api/bookings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...formData, phone: parsedPhone, totalAmount })
+        body: JSON.stringify(payload)
       });
 
       if (!bResponse.ok) {
@@ -380,32 +464,6 @@ export default function LandingPage() {
 
       const bResult = await bResponse.json();
       const bookingId = bResult.booking.id;
-
-      // 2. Submit the associated waiver agreement connected via bookingId
-      // Auto-populate waiver fields using Step 1 booking details to remove manual filling fields
-      const wResponse = await fetch('/api/waivers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          bookingId, 
-          guestName: `${formData.firstName} ${formData.lastName || ""}`.trim(),
-          communicationAddress: "Accepted Digitally",
-          phone: parsedPhone,
-          email: formData.email,
-          signature: `${formData.firstName} ${formData.lastName || ""}`.trim(),
-          agreementDate: new Date().toISOString().split('T')[0],
-          hasMinor: false,
-          guardianName: "",
-          guardianAddress: "",
-          guardianPhone: "",
-          guardianSignature: "",
-          dateOfSailing: formData.date
-        })
-      });
-
-      if (!wResponse.ok) {
-        console.warn("Waiver submission failed, booking completed.");
-      }
 
       const message = `🌊 *NEW BOOKING ENQUIRY* 🌊\n\n` +
                       `🆔 *Booking ID:* ${bookingId}\n` +
@@ -417,8 +475,7 @@ export default function LandingPage() {
                       `👥 *Members:* ${formData.guests}\n` +
                       `🏄 *Activities:* ${formData.activities.join(", ")}\n` +
                       `💰 *Total Amount:* ₹${totalAmount}\n` +
-                      `✍️ *Signed Waiver:* AGREED & CERTIFIED ✓\n` +
-                      `📝 *Special Request:* ${formData.specialRequest || "None"}\n`;
+                      `💬 *Message:* ${formData.specialRequest || "None"}\n`;
 
       const whatsappUrl = `https://wa.me/919025286044?text=${encodeURIComponent(message)}`;
       
@@ -437,15 +494,11 @@ export default function LandingPage() {
       };
 
       setLastConfirmedBooking(confirmedData);
+      setSubmittedEnquiry(confirmedData);
+      setShowContactPopup(true);
       setStatus("success");
-      setBookingStep(1); // Reset back to step 1 for subsequent runs
-      setAgreedToWaiver(false);
-      setScrolledToBottom(false);
-
-      // Scroll smoothly to booking section
-      document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth' });
-
-      // Reset forms
+      
+      // Reset form
       setFormData({
         firstName: "",
         lastName: "",
@@ -457,34 +510,11 @@ export default function LandingPage() {
         activities: [],
         specialRequest: ""
       });
-
-      setWaiverData({
-        guestName: "",
-        communicationAddress: "",
-        phone: "",
-        email: "",
-        signature: "",
-        agreementDate: "",
-        hasMinor: false,
-        guardianName: "",
-        guardianAddress: "",
-        guardianPhone: "",
-        guardianEmail: "",
-        guardianSignature: "",
-        guardianAgreementDate: "",
-        dateOfSailing: "",
-        invoiceNo: "",
-        boardingPassNo: "",
-        trip1Time: "",
-        trip2Time: "",
-        trip3Time: "",
-        trip4Time: "",
-        boatG1: false
-      });
+      setFieldErrors({});
 
     } catch (err: any) {
       setStatus("error");
-      setErrorMessage(err.message || "Failed to save booking");
+      setErrorMessage(formatSafeErrorMessage(err));
     }
   };
 
@@ -500,11 +530,6 @@ export default function LandingPage() {
     }
   };
 
-  const packages = [
-    { name: "Package 2500", price: "₹2500", period: "/person", description: "Special offer this month! Includes 3 amazing activities.", features: ["Parasailing", "Jet Ski", "1 Complementary Activity"], isPopular: true },
-    { name: "Overall Package", price: "₹4500", period: "/person", description: "The ultimate experience including all water sports activities.", features: ["Parasailing", "Jet Ski", "Flying Fish", "Speed Boat", "Banana Boat", "Crazy Sofa", "Doughnut Boat", "ATV"], isPopular: false }
-  ];
-
   const testimonials = [
     { quote: "We had been here to experience the speed boat ride. The cost was rupees five hundred each. Life jacket was provided. The experience was amazing and definitely worth it. You can spot dolphins if you are lucky. There is an option to dive in middle of the sea for two hundred rupees per person. The water was blue. Overall would recommend this to others.", name: "Verified Explorer" },
     { quote: "Wonderful experience with Joy water sports. Our family tried their Parasailing, doughnut ride, crazy sofa and it was really worth it and completely safe. They ensured we had the maximum fun and also suggested the right rides. Would highly recommend them !!", name: "HARRISH SREEDHAR" },
@@ -516,75 +541,66 @@ export default function LandingPage() {
 
   return (
     <div className="min-h-screen flex flex-col font-sans text-deep-blue overflow-x-hidden relative bg-foam-white">
+      <SEOHead
+        title="Joy Water Sports Varkala | #1 Water Sports & Papanasam Beach Booking"
+        description="Experience the top water sports in Varkala, Kerala! Book Parasailing, Jet Ski, Flying Fish, Speedboat & Banana rides at Papanasam Beach. Certified safety & instant digital ticket."
+        canonicalUrl="https://joywatersports.com"
+        keywords="water sports Varkala, water sports Papanasam beach, Varkala water sports booking, Parasailing Varkala, Jet ski Varkala, Flying fish Varkala, things to do in Varkala, Kerala holidays water sports"
+        schema={[
+          joyWaterSportsBusinessSchema,
+          {
+            '@type': 'FAQPage',
+            mainEntity: [
+              {
+                '@type': 'Question',
+                name: 'Where is Joy Water Sports located in Varkala?',
+                acceptedAnswer: {
+                  '@type': 'Answer',
+                  text: 'Joy Water Sports is located directly on Papanasam Beach shoreline below North Cliff, Varkala, Kerala 695141.'
+                }
+              },
+              {
+                '@type': 'Question',
+                name: 'What activities are available at Joy Water Sports Varkala?',
+                acceptedAnswer: {
+                  '@type': 'Answer',
+                  text: 'We offer Parasailing, Jet Skiing, Flying Fish, Speed Boat rides, Banana Boat, Crazy Sofa, Doughnut Boat, and Beach ATV quad rides.'
+                }
+              },
+              {
+                '@type': 'Question',
+                name: 'Is swimming required for water sports in Varkala?',
+                acceptedAnswer: {
+                  '@type': 'Answer',
+                  text: 'No, swimming is NOT required! We provide certified high-buoyancy life jackets and double-certified safety mariners for all activities.'
+                }
+              }
+            ]
+          }
+        ]}
+      />
       {/* Hero Vector Animated Video Background */}
       <div className="absolute top-0 left-0 w-full h-[85vh] sm:h-[65vh] lg:h-[65vh] z-0 overflow-hidden rounded-b-[40px] shadow-sm bg-[#f8f9fc]">
         <HeroVectorVideo />
       </div>
 
       {/* Navigation Bar */}
-      <nav className="fixed top-0 left-0 right-0 z-50 pt-4 px-4 sm:px-6 lg:px-8 text-deep-blue mx-auto w-full max-w-4xl transition-all duration-300">
-        <div className="rounded-full px-6 py-4 flex items-center justify-between relative" style={{ background: '#FFFFFF', backdropFilter: 'blur(12px)', border: '1px solid rgba(0, 0, 0, 0.05)', boxShadow: '0 8px 25px rgba(0, 0, 0, 0.06)' }}>
-          <div className="flex items-center cursor-pointer group" onClick={() => { window.scrollTo({ top: 0, behavior: 'smooth' }); setMobileMenuOpen(false); }}>
-            <img src="https://lh3.googleusercontent.com/d/1lgPHCbInbPso1-uCrJq05TeR5XTZLmEx" alt="Logo" className="h-8 sm:h-10 w-auto object-contain" />
+      <nav className="fixed top-0 left-0 right-0 z-50 pt-4 px-4 text-deep-blue mx-auto w-full max-w-3xl transition-all duration-300">
+        <div className="rounded-full px-5 sm:px-6 py-2.5 flex items-center justify-between relative bg-white/95 backdrop-blur-md border border-slate-200/60 shadow-lg shadow-black/5">
+          {/* Logo */}
+          <div className="flex items-center cursor-pointer group shrink-0" onClick={() => { window.scrollTo({ top: 0, behavior: 'smooth' }); setMobileMenuOpen(false); }}>
+            <img src="https://lh3.googleusercontent.com/d/1lgPHCbInbPso1-uCrJq05TeR5XTZLmEx" alt="Logo" className="h-7 sm:h-8 w-auto object-contain" />
           </div>
           
-          {/* Desktop Navigation Links */}
-          <div className="hidden md:flex items-center space-x-4 lg:space-x-8">
-            <button onClick={() => document.getElementById('activities-section')?.scrollIntoView({ behavior: 'smooth' })} className="flex items-center gap-1 px-2 py-2 text-[15px] font-bold text-deep-blue hover:text-sky-blue transition-colors">Activities</button>
-            <button onClick={() => document.getElementById('pricing-section')?.scrollIntoView({ behavior: 'smooth' })} className="flex items-center gap-1 px-2 py-2 text-[15px] font-bold text-deep-blue hover:text-sky-blue transition-colors">Pricing & Offers</button>
-            <button onClick={() => document.getElementById('reviews-section')?.scrollIntoView({ behavior: 'smooth' })} className="flex items-center gap-1 px-2 py-2 text-[15px] font-bold text-deep-blue hover:text-sky-blue transition-colors">Reviews</button>
-          </div>
-
-          {/* Desktop Actions */}
-          <div className="hidden md:flex items-center gap-2 sm:gap-3">
-            {isLoggedIn ? (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setShowUserMenu(!showUserMenu)}
-                  className="flex items-center gap-2 text-[15px] font-bold text-deep-blue hover:text-[#004E98] transition-colors px-3 py-1.5 rounded-full bg-sky-50/80 hover:bg-sky-100/90 border border-sky-100 cursor-pointer shadow-2xs"
-                  title="Click to view Account & Tickets"
-                >
-                  <div className="w-7 h-7 rounded-full bg-[#004E98] text-white flex items-center justify-center text-xs font-bold shadow-2xs">
-                    {userName ? userName.charAt(0).toUpperCase() : <User size={14} />}
-                  </div>
-                  <span>{userName}</span>
-                </button>
-                {showUserMenu && (
-                  <div className="absolute right-0 mt-2 w-60 bg-white rounded-2xl shadow-xl border border-gray-100 py-2 z-50 animate-fade-in">
-                    <div className="px-4 py-2.5 border-b border-gray-100 bg-slate-50/50">
-                      <p className="text-xs font-bold text-slate-900">{userName}</p>
-                      <p className="text-[10px] text-slate-500 truncate">{userEmail}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => { setShowUserMenu(false); handleOpenAccountModal(); }}
-                      className="w-full text-left px-4 py-3 text-xs font-bold text-[#004E98] hover:bg-sky-50 transition-colors flex items-center gap-2.5 cursor-pointer"
-                    >
-                      <Ticket size={16} className="text-[#004E98]" />
-                      <span>My Account &amp; Ticket Status</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { handleLogout(); setShowUserMenu(false); }}
-                      className="w-full text-left px-4 py-2.5 text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2 border-t border-gray-100 cursor-pointer"
-                    >
-                      <LogOut size={14} /> Logout
-                    </button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setIsLoginOpen(true)}
-                className="text-[15px] font-bold text-deep-blue hover:text-sky-blue transition-colors px-3 py-1.5 cursor-pointer flex items-center gap-1.5"
-              >
-                <User size={18} />
-                <span>Login</span>
-              </button>
-            )}
-            <button onClick={() => document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth' })} className="bg-gradient-to-r from-sky-blue to-deep-blue hover:from-sky-blue hover:to-ocean-blue text-white px-5 sm:px-7 py-2.5 rounded-full text-sm font-semibold shadow-lg shadow-sky-blue/20 transition-all transform hover:-translate-y-0.5 active:scale-95 cursor-pointer">Book Now</button>
+          {/* Desktop Navigation Links & Book Now Button (Centered with proper gap) */}
+          <div className="hidden md:flex items-center justify-center gap-6 lg:gap-8 mx-auto">
+            <button onClick={() => document.getElementById('activities-section')?.scrollIntoView({ behavior: 'smooth' })} className="text-[14px] font-bold text-deep-blue hover:text-sky-blue transition-colors cursor-pointer whitespace-nowrap">Activities</button>
+            <button onClick={() => document.getElementById('reviews-section')?.scrollIntoView({ behavior: 'smooth' })} className="text-[14px] font-bold text-deep-blue hover:text-sky-blue transition-colors cursor-pointer whitespace-nowrap">Reviews</button>
+            <Link to="/declaration" className="text-[14px] font-bold text-deep-blue hover:text-sky-blue transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1">
+              <FileText size={15} className="text-sky-600" />
+              Declaration
+            </Link>
+            <button onClick={() => document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth' })} className="bg-gradient-to-r from-sky-blue to-deep-blue hover:from-sky-blue hover:to-ocean-blue text-white px-5 py-2 rounded-full text-xs sm:text-sm font-bold shadow-md shadow-sky-blue/20 transition-all transform hover:-translate-y-0.5 active:scale-95 cursor-pointer whitespace-nowrap">Book Now</button>
           </div>
 
           {/* Mobile Navigation controls */}
@@ -628,15 +644,6 @@ export default function LandingPage() {
                 </button>
                 <button 
                   onClick={() => {
-                    document.getElementById('pricing-section')?.scrollIntoView({ behavior: 'smooth' });
-                    setMobileMenuOpen(false);
-                  }}
-                  className="w-full text-left py-2.5 px-3 text-sm font-bold text-deep-blue hover:text-sky-blue hover:bg-gray-50 rounded-xl transition-all"
-                >
-                  Pricing &amp; Special Offers
-                </button>
-                <button 
-                  onClick={() => {
                     document.getElementById('reviews-section')?.scrollIntoView({ behavior: 'smooth' });
                     setMobileMenuOpen(false);
                   }}
@@ -644,71 +651,25 @@ export default function LandingPage() {
                 >
                   Customer Reviews
                 </button>
+                <Link
+                  to="/declaration"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="w-full text-left py-2.5 px-3 text-sm font-bold text-deep-blue hover:text-sky-blue hover:bg-gray-50 rounded-xl transition-all flex items-center gap-2"
+                >
+                  <FileText size={16} className="text-sky-600" />
+                  Liability Waiver Declaration
+                </Link>
               </div>
 
-              {/* Mobile Auth & Account Access Container */}
+              {/* Mobile Ticket Status Check Container */}
               <div className="pt-1">
-                {isLoggedIn ? (
-                  <div className="bg-sky-50/70 rounded-2xl p-4 border border-sky-100 space-y-3">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenAccountModal()}
-                      className="w-full flex items-center justify-between text-left cursor-pointer group"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-[#004E98] text-white rounded-full flex items-center justify-center font-bold text-sm shrink-0 shadow-sm">
-                          {userName ? userName.charAt(0).toUpperCase() : <User size={18} />}
-                        </div>
-                        <div className="overflow-hidden">
-                          <h4 className="font-bold text-xs text-slate-900 leading-tight truncate group-hover:text-[#004E98] transition-colors">{userName}</h4>
-                          <p className="text-[10px] text-slate-500 truncate mt-0.5">{userEmail}</p>
-                        </div>
-                      </div>
-                      <span className="text-[10px] bg-[#004E98] text-white font-extrabold px-2.5 py-1 rounded-full shrink-0 shadow-2xs">
-                        View Tickets
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleOpenAccountModal()}
-                      className="w-full bg-[#004E98] hover:bg-[#003B73] text-white font-bold py-2.5 px-4 rounded-xl text-center text-xs transition-colors flex items-center justify-center gap-2 shadow-sm cursor-pointer"
-                    >
-                      <Ticket size={15} /> My Account &amp; Ticket Status
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleLogout();
-                        setMobileMenuOpen(false);
-                      }}
-                      className="w-full bg-red-50 hover:bg-red-100 text-red-600 font-bold py-2 px-4 rounded-xl text-center text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <LogOut size={14} /> Logout
-                    </button>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenAccountModal()}
-                      className="w-full bg-sky-50 border border-sky-200 text-[#004E98] font-bold py-2.5 px-4 rounded-xl text-center text-xs transition-all shadow-2xs cursor-pointer flex items-center justify-center gap-2"
-                    >
-                      <Ticket size={15} /> Check Ticket Status by Phone / ID
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsLoginOpen(true);
-                        setMobileMenuOpen(false);
-                      }}
-                      className="w-full bg-deep-blue hover:bg-sky-blue text-white font-bold py-2.5 px-4 rounded-xl text-center text-xs transition-all shadow-md active:scale-95 cursor-pointer"
-                    >
-                      Access Login / Signup
-                    </button>
-                  </div>
-                )}
+                <button
+                  type="button"
+                  onClick={() => handleOpenAccountModal()}
+                  className="w-full bg-sky-50 border border-sky-200 text-[#004E98] font-bold py-2.5 px-4 rounded-xl text-center text-xs transition-all shadow-2xs cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <Ticket size={15} /> Check Ticket Status by Phone / ID
+                </button>
               </div>
             </motion.div>
           )}
@@ -732,10 +693,10 @@ export default function LandingPage() {
           <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-[64px] font-display text-deep-blue leading-tight mb-6 font-semibold">A wonderful place <br/>for a <span className="text-sky-blue">family vacation</span></h2>
           <p className="text-deep-blue/70 max-w-[650px] text-sm md:text-base leading-relaxed font-semibold">Feel the harmony, enjoy the comfort, admire the beautiful views and interiors. Our resort is one of the most suitable places for relaxation and unforgettable memories.</p>
         </div>
-        <div className="w-full max-w-7xl mx-auto flex h-[280px] sm:h-[340px] md:h-[420px] lg:h-[520px] gap-1 px-3 md:px-6 justify-center">
-          <div className="w-[18%] sm:w-[20%] md:w-[22%] h-full overflow-hidden border border-gray-100 shadow-sm rounded-l-2xl"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/jws1.png" alt="Resort" className="w-full h-full object-cover" /></div>
-          <div className="w-[50%] sm:w-[52%] md:w-[54%] h-full overflow-hidden border border-gray-100 shadow-sm"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/parasailingmain.png" alt="Adventure" className="w-full h-full object-cover" /></div>
-          <div className="w-[18%] sm:w-[20%] md:w-[22%] h-full overflow-hidden border border-gray-100 shadow-sm rounded-r-2xl"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/jws3.png" alt="Pool" className="w-full h-full object-cover" /></div>
+        <div className="w-full max-w-7xl mx-auto flex h-[300px] sm:h-[340px] md:h-[420px] lg:h-[520px] gap-1 px-2 sm:px-6 justify-center">
+          <div className="w-[25%] sm:w-[20%] md:w-[22%] h-full overflow-hidden border border-gray-100 shadow-sm rounded-l-2xl"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/jws1.png" alt="Resort" className="w-full h-full object-cover" /></div>
+          <div className="w-[50%] sm:w-[56%] md:w-[54%] h-full overflow-hidden border border-gray-100 shadow-sm"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/parasailingmain.png" alt="Adventure" className="w-full h-full object-cover" /></div>
+          <div className="w-[25%] sm:w-[20%] md:w-[22%] h-full overflow-hidden border border-gray-100 shadow-sm rounded-r-2xl"><img loading="lazy" decoding="async" src="https://ubitbdocjzffvfkketyr.supabase.co/storage/v1/object/public/JWS/JWS-WEBSITE/jws3.png" alt="Pool" className="w-full h-full object-cover" /></div>
         </div>
       </section>
 
@@ -847,59 +808,6 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Pricing Section */}
-      <section id="pricing-section" className="relative w-full flex flex-col items-center px-4 sm:px-12 py-16 lg:py-24 bg-surf-2">
-        <div className="absolute inset-0 z-0 opacity-10" style={{ backgroundImage: "url('https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&q=80&w=2000')", backgroundSize: 'cover', backgroundPosition: 'center', backgroundAttachment: 'fixed' }}></div>
-        <div className="absolute inset-0 bg-gradient-to-b from-surf-2 via-surf-2/85 to-surf-2 z-0"></div>
-        <div className="relative z-10 flex flex-col items-center w-full">
-          <span className="text-sky-blue text-xs font-bold uppercase tracking-widest mb-4 underline underline-offset-4 decoration-deep-blue decoration-2">Exclusive Packages</span>
-          <h2 className="text-3xl sm:text-4xl md:text-5xl font-display text-deep-blue leading-tight text-center mb-5 font-semibold">Unbeatable <span className="text-sky-blue">Adventures</span></h2>
-          <p className="text-deep-blue/60 text-center max-w-[500px] text-sm md:text-base leading-relaxed mb-12 sm:mb-16 px-2 font-medium">Choose an adventure package that suits you best. Get more activities for a better price.</p>
-          
-          <div className="flex flex-col lg:flex-row items-stretch justify-center gap-6 sm:gap-8 w-full max-w-[850px] px-4 lg:px-0">
-            {packages.map((pkg, index) => (
-              <div key={index} className={`w-full lg:w-1/2 flex flex-col p-8 sm:p-10 rounded-[32px] transition-all duration-300 hover:-translate-y-2 ${pkg.isPopular ? 'bg-deep-blue text-white shadow-2xl relative lg:-mt-4 lg:-mb-4 z-10 border border-white/10' : 'bg-white text-deep-blue shadow-xl border border-gray-100 hover:shadow-2xl z-0'}`}>
-                {pkg.isPopular && (
-                  <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-sky-blue text-white text-[11px] font-bold tracking-wider uppercase px-4 py-1.5 rounded-full shadow-lg">
-                    Best Value
-                  </div>
-                )}
-                <h3 className={`font-serif mb-2 ${pkg.isPopular ? 'text-[28px] sm:text-[32px]' : 'text-[24px] sm:text-[28px]'}`}>{pkg.name}</h3>
-                <p className={`leading-relaxed mb-6 font-medium ${pkg.isPopular ? 'text-white/80' : 'text-deep-blue/70'}`}>{pkg.description}</p>
-                
-                <div className="flex items-baseline gap-1 mb-6 pb-6 border-b border-opacity-20 border-current">
-                  <span className={`font-medium tracking-tight leading-none ${pkg.isPopular ? 'text-[52px] sm:text-[64px] text-sky-blue' : 'text-[44px] sm:text-[52px] text-deep-blue'}`}>{pkg.price}</span>
-                  <span className={`text-[14px] sm:text-[15px] ${pkg.isPopular ? 'text-white/70' : 'text-deep-blue/60'}`}>{pkg.period}</span>
-                </div>
-                
-                <div className="mb-8 flex-1">
-                  <p className={`font-bold tracking-wider uppercase mb-5 ${pkg.isPopular ? 'text-[14px] text-white/90' : 'text-[13px] text-deep-blue/90'}`}>What's Included:</p>
-                  <ul className={`flex flex-col ${pkg.isPopular ? 'gap-4' : 'gap-3.5'}`}>
-                    {pkg.features.map((feature, i) => (
-                      <li key={i} className="flex items-start gap-3">
-                        <Check size={pkg.isPopular ? 20 : 18} strokeWidth={3} className={`shrink-0 ${pkg.isPopular ? 'mt-1 text-sky-blue' : 'mt-0.5 text-sky-blue'}`} />
-                        <span className={`leading-snug font-medium ${pkg.isPopular ? 'text-[16px] sm:text-[18px] text-white' : 'text-[15px] text-deep-blue/80'}`}>{feature}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <button 
-                  type="button"
-                  onClick={() => {
-                    const activityName = pkg.name === "Overall Package" ? "OVERALL" : "PACKAGE 2500";
-                    setFormData(prev => ({ ...prev, activities: [activityName] }));
-                    const el = document.getElementById("booking-section");
-                    if (el) el.scrollIntoView({ behavior: 'smooth' });
-                  }}
-                  className={`w-full py-4 rounded-2xl text-sm font-bold tracking-wide transition-all duration-300 shadow-md hover:shadow-xl ${pkg.isPopular ? 'bg-gradient-to-r from-sky-blue to-ocean-blue hover:from-sky-blue hover:to-deep-blue text-white' : 'bg-gradient-to-r from-deep-blue to-ocean-blue hover:from-ocean-blue hover:to-sky-blue text-white'}`}>
-                  Book This Package
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
       {/* Video Gallery Section */}
       <LazySection>
         <VideoGallerySection />
@@ -911,11 +819,22 @@ export default function LandingPage() {
           <h2 className="text-3xl md:text-4xl lg:text-[56px] font-display text-deep-blue leading-tight mb-4 font-semibold">What Our Clients Are Saying</h2>
           <p className="text-deep-blue/70 max-w-[650px] text-sm md:text-base leading-relaxed font-semibold">Our users love how our platform simplifies their adventures</p>
         </div>
-        <div className="w-full relative overflow-hidden flex max-w-[1400px] [mask-image:_linear-gradient(to_right,transparent_0,_black_128px,_black_calc(100%-128px),transparent_100%)]">
-          <div className="flex w-max animate-marquee md:hover:[animation-play-state:paused] will-change-transform">
+        <div 
+          className="w-full relative overflow-hidden flex max-w-[1400px] [mask-image:_linear-gradient(to_right,transparent_0,_black_128px,_black_calc(100%-128px),transparent_100%)] touch-pan-x select-none"
+          onMouseEnter={() => setIsReviewsPaused(true)}
+          onMouseLeave={() => setIsReviewsPaused(false)}
+          onTouchStart={() => setIsReviewsPaused(true)}
+          onTouchEnd={() => setIsReviewsPaused(false)}
+          onTouchCancel={() => setIsReviewsPaused(false)}
+          onClick={() => setIsReviewsPaused(prev => !prev)}
+        >
+          <div 
+            className="flex w-max animate-marquee hover:[animation-play-state:paused] active:[animation-play-state:paused] focus:[animation-play-state:paused] will-change-transform"
+            style={{ animationPlayState: isReviewsPaused ? 'paused' : 'running' }}
+          >
             <div className="flex gap-4 sm:gap-6 pr-4 sm:pr-6 w-max">
               {testimonials.map((testi, index) => (
-                <div key={`orig-${index}`} className="w-[300px] sm:w-[320px] lg:w-[370px] shrink-0 bg-white p-5 rounded-[20px] border border-gray-100 shadow-sm flex flex-col justify-between">
+                <div key={`orig-${index}`} className="w-[300px] sm:w-[320px] lg:w-[370px] shrink-0 bg-white p-5 rounded-[20px] border border-gray-100 shadow-sm flex flex-col justify-between cursor-pointer hover:shadow-md transition-shadow">
                   <div>
                     <div className="flex gap-1 mb-2 text-amber-400">
                       <span className="text-sm">★</span>
@@ -930,7 +849,7 @@ export default function LandingPage() {
                 </div>
               ))}
               {testimonials.map((testi, index) => (
-                <div key={`dup-${index}`} className="w-[300px] sm:w-[320px] lg:w-[370px] shrink-0 bg-white p-5 rounded-[20px] border border-gray-100 shadow-sm flex flex-col justify-between">
+                <div key={`dup-${index}`} className="w-[300px] sm:w-[320px] lg:w-[370px] shrink-0 bg-white p-5 rounded-[20px] border border-gray-100 shadow-sm flex flex-col justify-between cursor-pointer hover:shadow-md transition-shadow">
                   <div>
                     <div className="flex gap-1 mb-2 text-amber-400">
                       <span className="text-sm">★</span>
@@ -999,399 +918,264 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Booking Section */}
-      <section id="booking-section" className="relative w-full flex justify-center px-4 sm:px-6 py-12 sm:py-16 bg-slate-100">
-        <div className="w-full max-w-3xl">
+      {/* Booking & Direct Enquiry Section */}
+      <section id="booking-section" className="relative w-full flex justify-center px-4 sm:px-6 py-8 sm:py-10 bg-slate-50">
+        <div className="w-full max-w-xl">
           {/* Section Header */}
-          <div className="text-center mb-8 sm:mb-10 animate-fade-in flex flex-col items-center">
-            <span className="text-sky-blue text-xs font-bold uppercase tracking-widest mb-3">
-              Book Your Adventure
+          <div className="text-center mb-6">
+            <span className="text-sky-blue text-xs font-bold uppercase tracking-widest mb-3 inline-block underline underline-offset-4 decoration-deep-blue decoration-2">
+              BOOK YOUR ADVENTURE
             </span>
-            <h2 className="text-2xl sm:text-3xl md:text-3xl font-display text-deep-blue leading-tight mt-1 mb-2 font-semibold">
+            <h2 className="text-2xl sm:text-3xl md:text-4xl font-display text-deep-blue leading-tight font-semibold">
               Ready for the <span className="text-sky-blue">Experience?</span>
             </h2>
-            <p className="text-deep-blue/50 text-sm max-w-md mx-auto">
+            <p className="text-gray-500 font-medium text-xs sm:text-sm leading-relaxed mt-2 max-w-md mx-auto">
               Fill in your details and we will secure your slot within 24 hours
             </p>
           </div>
 
-          {/* Main Form Card */}
-          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden">
-            {/* Minimalist Horizontal Quick Info Ribbon (No Emojis) */}
-            <div className="grid grid-cols-3 gap-1 text-center bg-slate-950 border-b border-slate-900 py-5 px-4 sm:px-8">
-              <div>
-                <p className="text-slate-400 text-[10px] uppercase tracking-wider font-semibold mb-0.5">Best Season</p>
-                <p className="text-white text-[11px] sm:text-xs font-bold">October - March</p>
-              </div>
-              <div className="border-x border-slate-800/80">
-                <p className="text-slate-400 text-[10px] uppercase tracking-wider font-semibold mb-0.5">Group Size</p>
-                <p className="text-white text-[11px] sm:text-xs font-bold">1 - 20 Guests</p>
-              </div>
-              <div>
-                <p className="text-slate-400 text-[10px] uppercase tracking-wider font-semibold mb-0.5">Service Score</p>
-                <p className="text-white text-[11px] sm:text-xs font-bold">4.9/5 Rating</p>
-              </div>
+          {/* Booking Card */}
+          <div className="bg-white rounded-none shadow-lg border border-slate-200/80 overflow-hidden p-5 sm:p-6 transition-all">
+            {/* Header */}
+            <div className="border-b border-slate-200 pb-3 mb-4">
+              <h3 className="text-base sm:text-lg font-bold text-[#0B1E3C] flex items-center gap-2">
+                <Ticket className="text-[#004E98]" size={20} />
+                Online Booking Reservation
+              </h3>
+              <p className="text-xs text-slate-500 font-medium">Fill in details below to reserve your slots. Declaration form can be completed after booking.</p>
             </div>
 
-            <div className="p-6 sm:p-10">
-              {status === "success" ? (
-                <div className="flex flex-col items-center py-10 text-center bg-white rounded-2xl p-6 sm:p-8 border border-white shadow-sm animate-fade-in">
-                  <div className="w-14 h-14 bg-emerald-500 text-white rounded-full flex items-center justify-center mb-4 shadow-md shadow-emerald-500/20">
-                    <Check size={28} strokeWidth={2.5} />
+            {/* RESERVATION FORM */}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="space-y-3.5 animate-fade-in">
+                {/* Row 1: First Name & Last Name */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div id="field-firstName" className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">First Name <span className="text-red-500">*</span></label>
+                    <input
+                      type="text"
+                      name="firstName"
+                      required
+                      value={formData.firstName}
+                      onChange={handleChange}
+                      placeholder="Enter first name"
+                      className={`w-full bg-slate-50/70 border ${fieldErrors.firstName ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all`}
+                    />
+                    {fieldErrors.firstName && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.firstName}</p>}
                   </div>
-                  <h3 className="text-xl font-bold text-slate-900 mb-2">
-                    Booked Successfully!
-                  </h3>
-                  <p className="text-[#004E98] text-sm sm:text-base font-bold mb-3 max-w-md">
-                    Our team will contact you soon!
-                  </p>
-                  <p className="text-slate-600 text-xs sm:text-sm mb-6 max-w-sm leading-relaxed">
-                    We have saved your reservation details. You can view your ticket and status anytime from your account!
-                  </p>
-                  <button type="button" onClick={() => setStatus("idle")} className="px-6 py-2.5 bg-deep-blue hover:bg-ocean-blue text-white rounded-xl text-sm font-semibold transition-all shadow-md active:scale-95 cursor-pointer">
-                    Book Another Activity
-                  </button>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">Last Name</label>
+                    <input
+                      type="text"
+                      name="lastName"
+                      value={formData.lastName}
+                      onChange={handleChange}
+                      placeholder="Enter last name"
+                      className="w-full bg-slate-50/70 border border-slate-200/90 rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all"
+                    />
+                  </div>
                 </div>
-              ) : !isLoggedIn ? (
-                <div className="flex flex-col items-center py-12 px-6 text-center bg-slate-50/60 rounded-2xl border border-dashed border-slate-200">
-                  <div className="w-12 h-12 bg-deep-blue/10 text-deep-blue rounded-full flex items-center justify-center mb-4">
-                    <User size={24} className="text-deep-blue" />
+
+                {/* Row 2: Email Address & Phone Number */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div id="field-email" className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">Email Address <span className="text-red-500">*</span></label>
+                    <input
+                      type="email"
+                      name="email"
+                      required
+                      value={formData.email}
+                      onChange={handleChange}
+                      placeholder="Enter email address"
+                      className={`w-full bg-slate-50/70 border ${fieldErrors.email ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all`}
+                    />
+                    {fieldErrors.email && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.email}</p>}
                   </div>
-                  <h3 className="text-lg font-display text-deep-blue mb-2 font-bold">Login Required</h3>
-                  <p className="text-deep-blue/60 text-sm mb-6 max-w-md">
-                    Please log in or register to complete your adventure booking. An account lets you access your tickets, sign the waiver agreement, and get real-time status updates!
-                  </p>
-                  <button 
-                    type="button" 
-                    onClick={() => setIsLoginOpen(true)} 
-                    className="px-8 py-3 bg-deep-blue hover:bg-ocean-blue text-white rounded-xl text-sm font-bold transition hover:shadow-md cursor-pointer transform hover:-translate-y-0.5 active:scale-95"
+                  <div id="field-phone" className="space-y-1">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <label className="text-xs font-semibold text-slate-600">Phone Number (WhatsApp) <span className="text-red-500">*</span></label>
+                      <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">REQUIRED</span>
+                    </div>
+                    <input
+                      type="tel"
+                      name="phone"
+                      required
+                      value={formData.phone}
+                      onChange={handleChange}
+                      placeholder="Enter phone number"
+                      className={`w-full bg-slate-50/70 border ${fieldErrors.phone ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all`}
+                    />
+                    {fieldErrors.phone && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.phone}</p>}
+                  </div>
+                </div>
+
+                {/* Row 3: Date, Time Slot, Guests */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div id="field-date" className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">Date <span className="text-red-500">*</span></label>
+                    <input
+                      type="date"
+                      name="date"
+                      required
+                      value={formData.date}
+                      onChange={handleChange}
+                      className={`w-full bg-slate-50/70 border ${fieldErrors.date ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all cursor-pointer`}
+                    />
+                    {fieldErrors.date && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.date}</p>}
+                  </div>
+                  <div id="field-time" className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">Time Slot <span className="text-red-500">*</span></label>
+                    <select
+                      name="time"
+                      required
+                      value={formData.time}
+                      onChange={handleChange}
+                      className={`w-full bg-slate-50/70 border ${fieldErrors.time ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all cursor-pointer`}
+                    >
+                      <option value="">Select Time</option>
+                      <option value="09:00">09:00 AM</option>
+                      <option value="10:00">10:00 AM</option>
+                      <option value="11:00">11:00 AM</option>
+                      <option value="12:00">12:00 PM</option>
+                      <option value="13:00">01:00 PM</option>
+                      <option value="14:00">02:00 PM</option>
+                      <option value="15:00">03:00 PM</option>
+                      <option value="16:00">04:00 PM</option>
+                      <option value="17:00">05:00 PM</option>
+                    </select>
+                    {fieldErrors.time && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.time}</p>}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-600 block">Guests</label>
+                    <select
+                      name="guests"
+                      value={formData.guests}
+                      onChange={handleChange}
+                      className="w-full bg-slate-50/70 border border-slate-200/90 rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all cursor-pointer"
+                    >
+                      {[1,2,3,4,5,6,7,8,9,10,12,15,20].map(n => (
+                        <option key={n} value={n}>{n} Guest{n > 1 ? 's' : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Row 4: Select Activities */}
+                <div id="field-activities" className="space-y-1 relative">
+                  <label className="text-xs font-semibold text-slate-600 block">Select Activities <span className="text-red-500">*</span></label>
+                  <button
+                    type="button"
+                    onClick={() => setIsActivityOpen(!isActivityOpen)}
+                    className={`w-full bg-slate-50/70 border ${fieldErrors.activities ? 'border-red-500' : 'border-slate-200/90'} rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 flex items-center justify-between cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#004E98]`}
                   >
-                    Log In / Register Now
+                    <span className={formData.activities.length === 0 ? "text-slate-400 font-normal" : "text-slate-900 font-semibold truncate max-w-[90%]"}>
+                      {formData.activities.length === 0 ? "Click to choose items..." : formData.activities.join(", ")}
+                    </span>
+                    <ChevronDown size={16} className={`text-slate-400 transition-transform ${isActivityOpen ? 'rotate-180' : ''}`} />
                   </button>
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  {/* Progress Indicator */}
-                  <div className="flex items-center justify-center gap-2 mb-4">
-                    <span className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${bookingStep === 1 ? 'bg-deep-blue text-white' : 'bg-gray-100 text-gray-500'}`}>1. Reservation</span>
-                    <div className="w-8 h-0.5 bg-gray-200"></div>
-                    <span className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${bookingStep === 2 ? 'bg-deep-blue text-white' : 'bg-gray-100 text-gray-400'}`}>2. Liability Waiver</span>
-                  </div>
+                  {fieldErrors.activities && <p className="text-[11px] text-red-500 font-medium">{fieldErrors.activities}</p>}
 
-                  <form className="space-y-4" onSubmit={handleSubmit}>
-                    {bookingStep === 1 ? (
-                      <>
-                        {/* Step 1: Reservation Form Fields */}
-                        {/* Row 1 - Name */}
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="flex flex-col gap-1">
-                            <label htmlFor="firstName" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 text-left">First Name</label>
-                            <input id="firstName" required name="firstName" value={formData.firstName} onChange={handleChange} autoComplete="given-name" type="text" placeholder="John" className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition text-left" />
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            <label htmlFor="lastName" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 text-left">Last Name</label>
-                            <input id="lastName" name="lastName" value={formData.lastName} onChange={handleChange} autoComplete="family-name" type="text" placeholder="Doe" className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition text-left" />
-                          </div>
-                        </div>
+                  {/* Opened Dropdown Panel */}
+                  {isActivityOpen && (
+                    <div className="absolute top-full left-0 right-0 z-30 mt-1 bg-white border border-slate-200 rounded-none shadow-2xl p-2.5 pb-8 max-h-[300px] overflow-y-auto">
+                      {(() => {
+                        const allKeys = Object.keys(ACTIVITY_PRICES).filter(k => k !== 'OVERALL' && k !== 'PACKAGE 2500');
 
-                        {/* Row 2 - Email & Phone */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          <div className="flex flex-col gap-1">
-                            <label htmlFor="email" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 text-left">Email Address</label>
-                            <input id="email" required name="email" value={formData.email} onChange={handleChange} autoComplete="email" type="email" placeholder="john@example.com" className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition text-left" />
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            <label htmlFor="phone" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 flex justify-between">
-                              <span>Phone Number (with WhatsApp)</span>
-                              <span className="text-[8px] text-gray-400 font-bold uppercase tracking-wider">Required</span>
-                            </label>
-                            <input id="phone" required name="phone" value={formData.phone} onChange={handleChange} autoComplete="tel" type="tel" placeholder="+91 98765 43210" className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition text-left" />
-                          </div>
-                        </div>
+                        return (
+                          <>
+                            {allKeys.map((activity, idx) => {
+                              const price = ACTIVITY_PRICES[activity];
+                              const isChecked = formData.activities.includes(activity);
+                              const isLastItem = idx === allKeys.length - 1;
 
-                        {/* Row 3 - Date, Time & Guests */}
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                          <div className="flex flex-col gap-1 col-span-2 sm:col-span-1">
-                            <label htmlFor="date" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 text-left">Date</label>
-                            <input id="date" required name="date" value={formData.date} onChange={handleChange} type="date" className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition cursor-pointer text-left" />
-                          </div>
-                          <div className="flex flex-col gap-1 flex-1 relative">
-                            <label htmlFor="time" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 flex justify-between items-center">
-                              <span>Time Slot</span>
-                              {formData.time && (
-                                ['09:00', '10:00', '16:00', '17:00'].includes(formData.time) ? (
-                                  <span className="text-[8px] sm:text-[9px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold">Fast Filling</span>
-                                ) : ['11:00', '12:00', '13:00'].includes(formData.time) ? (
-                                  <span className="text-[8px] sm:text-[9px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-bold">Moderate</span>
-                                ) : (
-                                  <span className="text-[8px] sm:text-[9px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded-full font-bold">Available</span>
-                                )
-                              )}
-                            </label>
-                            <select id="time" required name="time" value={formData.time} onChange={handleChange} className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none appearance-none cursor-pointer text-left">
-                              <option value="" disabled>Select Time</option>
-                              <option value="09:00">09:00 AM</option>
-                              <option value="10:00">10:00 AM</option>
-                              <option value="11:00">11:00 AM</option>
-                              <option value="12:00">12:00 PM</option>
-                              <option value="13:00">01:00 PM</option>
-                              <option value="14:00">02:00 PM</option>
-                              <option value="15:00">03:00 PM</option>
-                              <option value="16:00">04:00 PM</option>
-                              <option value="17:00">05:00 PM</option>
-                            </select>
-                            <div className="absolute top-[34px] sm:top-[38px] right-3 sm:right-4 flex items-center pointer-events-none text-gray-400">
-                              <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                              </svg>
-                            </div>
-                          </div>
-                          <div className="flex flex-col gap-1 flex-1 relative">
-                            <label htmlFor="guests" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1 text-left">Guests</label>
-                            <select id="guests" name="guests" value={formData.guests} onChange={handleChange} className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none appearance-none cursor-pointer text-left">
-                              {[1,2,3,4,5,6,7,8,9,10,15,20].map(n => <option key={n} value={n}>{n} Guest{n > 1 ? 's' : ''}</option>)}
-                            </select>
-                            <div className="absolute top-[34px] sm:top-[38px] right-3 sm:right-4 flex items-center pointer-events-none text-gray-400">
-                              <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                              </svg>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Activities - Dropdown Selector */}
-                        <div className="flex flex-col gap-1 relative text-left">
-                          <label className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Select Activities or Packages</label>
-                          <button
-                            type="button"
-                            onClick={() => setIsActivityOpen(!isActivityOpen)}
-                            className="w-full bg-slate-50/50 px-3.5 py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition flex justify-between items-center text-left"
-                          >
-                            <span className={`truncate ${formData.activities.length === 0 ? 'text-gray-400' : 'text-deep-blue font-semibold'}`}>
-                              {formData.activities.length === 0 
-                                ? "Click to choose items..." 
-                                : formData.activities.join(", ")
-                              }
-                            </span>
-                            <div className={`transition-transform duration-200 shrink-0 ml-2 text-gray-400 ${isActivityOpen ? 'rotate-180' : ''}`}>
-                              <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                              </svg>
-                            </div>
-                          </button>
-                          
-                          {isActivityOpen && (
-                            <div className="absolute top-[100%] left-0 right-0 z-20 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl p-1.5 sm:p-2 max-h-[220px] overflow-y-auto w-full animate-fade-in">
-                              <div className="flex flex-col gap-0.5">
-                                {Object.keys(ACTIVITY_PRICES).map(activity => {
-                                  const isPkg = isPackageOption(activity);
-                                  const selectedPkg = formData.activities.find(isPackageOption);
-                                  const hasIndividualSelected = formData.activities.some(a => !isPackageOption(a));
-                                  const active = formData.activities.includes(activity);
-
-                                  let isDisabled = false;
-                                  let disabledReason = '';
-
-                                  if (selectedPkg) {
-                                    // If a package is selected
-                                    if (activity !== selectedPkg) {
-                                      isDisabled = true;
-                                      if (selectedPkg === 'PACKAGE 2500') {
-                                        disabledReason = 'Package 2500 selected. Other options disabled.';
-                                      } else if (selectedPkg === 'OVERALL') {
-                                        disabledReason = 'Overall Package (₹4500) selected. Other options disabled.';
-                                      } else {
-                                        disabledReason = 'Package selected. Other options disabled.';
-                                      }
-                                    }
-                                  } else if (hasIndividualSelected) {
-                                    // If individual activities are selected
-                                    if (isPkg) {
-                                      isDisabled = true;
-                                      disabledReason = 'Deselect individual activities to select a package.';
-                                    }
-                                  }
-
-                                  return (
-                                    <label 
-                                      key={activity}
-                                      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg transition-colors ${
-                                        isDisabled ? 'opacity-50 cursor-not-allowed bg-gray-50' : 'hover:bg-gray-50 cursor-pointer'
-                                      }`}
-                                      onClick={(e) => {
-                                        if (isDisabled) {
-                                          e.preventDefault();
-                                        }
-                                      }}
-                                    >
-                                      <input 
+                              return (
+                                <React.Fragment key={activity}>
+                                  <label className="flex items-center justify-between py-1.5 px-2 rounded-none hover:bg-slate-50 cursor-pointer transition-colors">
+                                    <div className="flex items-center gap-2.5">
+                                      <input
                                         type="checkbox"
-                                        disabled={isDisabled}
-                                        checked={active}
+                                        checked={isChecked}
                                         onChange={() => handleActivityToggle(activity)}
-                                        className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-ocean-blue border-gray-300 rounded focus:ring-ocean-blue"
+                                        className="w-4 h-4 rounded-none border-slate-300 text-[#004E98] focus:ring-[#004E98]"
                                       />
-                                      <div className="flex flex-col">
-                                        <span className="text-[11px] sm:text-xs font-semibold text-deep-blue">
-                                          {activity === 'PACKAGE 2500' ? 'Package 2500 (Combo Offer)' : activity === 'OVERALL' ? 'Overall Package (All Activities)' : activity}
-                                        </span>
-                                        {isDisabled && disabledReason && (
-                                          <span className="text-[9px] text-amber-600 font-medium italic">
-                                            {disabledReason}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <span className="ml-auto text-[10px] sm:text-xs font-bold text-ocean-blue bg-ocean-blue/10 px-1.5 py-0.5 rounded-full whitespace-nowrap">₹{ACTIVITY_PRICES[activity]}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-                        </div>
+                                      <span className="text-xs font-bold text-slate-800 uppercase tracking-wide">
+                                        {activity}
+                                      </span>
+                                    </div>
+                                    <span className="text-sm sm:text-base font-black text-[#004E98] font-mono">
+                                      ₹{price}
+                                    </span>
+                                  </label>
 
-                        {/* Total Bill Amount Display */}
-                        <div className="flex flex-col gap-1 text-left">
-                          <p className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Total Calculated Amount</p>
-                          <div className="bg-ocean-blue/5 border border-ocean-blue/15 rounded-xl px-4 py-3 flex items-center justify-between">
-                            <span className="text-xs font-medium text-slate-600">Total Bill for {formData.guests || 1} guest(s)</span>
-                            <span className="text-base sm:text-lg font-black text-ocean-blue">₹{totalAmount.toLocaleString('en-IN')}</span>
-                          </div>
-                        </div>
+                                  {/* Divider line below activity item */}
+                                  {!isLastItem && (
+                                    <div className="border-b border-slate-200 my-1"></div>
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                            <div className="h-6"></div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
 
-                        <div className="flex flex-col gap-1 text-left">
-                          <label htmlFor="notes" className="text-[10px] sm:text-xs font-semibold text-deep-blue/70 px-1">Special Request (Optional)</label>
-                          <input id="notes" name="specialRequest" value={formData.specialRequest} onChange={handleChange} type="text" placeholder="assistance, etc." className="w-full bg-slate-50/50 px-3.5 py-2.5 sm:py-3 rounded-xl text-sm border border-gray-200 focus:border-ocean-blue outline-none transition" />
-                        </div>
+                {/* Row 5: Total Calculated Amount */}
+                <div className="space-y-1 pt-0.5">
+                  <label className="text-xs font-semibold text-slate-600 block">Total Calculated Amount</label>
+                  <div className="bg-[#F0F5FA] border border-sky-100 rounded-none px-4 py-2.5 flex items-center justify-between">
+                    <span className="text-xs sm:text-sm font-semibold text-slate-600">
+                      Total Bill for {formData.guests || 1} guest(s)
+                    </span>
+                    <span className="text-lg sm:text-xl font-black text-[#004E98] font-mono">
+                      ₹{totalAmount.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                </div>
 
-                        {errorMessage && <p className="text-red-500 text-xs font-bold text-left">{errorMessage}</p>}
+                {/* Row 6: Message (Optional) */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600 block">Message</label>
+                  <input
+                    type="text"
+                    name="specialRequest"
+                    value={formData.specialRequest}
+                    onChange={handleChange}
+                    placeholder="Type your message here..."
+                    className="w-full bg-slate-50/70 border border-slate-200/90 rounded-none px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#004E98] focus:bg-white transition-all"
+                  />
+                </div>
 
-                        {/* Step 1 Button */}
-                        <button type="submit" className="w-full py-3.5 bg-deep-blue hover:bg-ocean-blue text-white rounded-xl font-bold text-sm hover:shadow-md transition-all flex items-center justify-center gap-2 mt-4 transform cursor-pointer">
-                          Continue to Safety Waiver <ArrowRight size={16} />
-                        </button>
-                      </>
+                {/* SUBMIT BUTTON */}
+                <div className="pt-3">
+                  <button
+                    type="submit"
+                    disabled={status === "loading"}
+                    className="w-full py-3.5 bg-[#0B1E3C] hover:bg-[#002855] text-white font-bold text-sm rounded-none shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer disabled:bg-slate-300 disabled:cursor-not-allowed"
+                  >
+                    {status === "loading" ? (
+                      <span className="flex items-center gap-2">
+                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                        Submitting Booking...
+                      </span>
                     ) : (
                       <>
-                        {/* Step 2: Safety & Liability Waiver Agreement */}
-                        <div className="space-y-4">
-                          {/* Rich scrolling waiver panel */}
-                          <div className="bg-slate-900 border border-slate-950 rounded-2xl overflow-hidden shadow-inner">
-                            {/* Paper mockup title block */}
-                            <div className="bg-slate-950 border-b border-slate-800 p-4 text-center">
-                              <h4 className="text-slate-100 font-extrabold tracking-wider text-sm sm:text-base font-display">JOY WATER SPORTS</h4>
-                              <p className="text-sky-blue font-bold text-[10px] sm:text-[11px] tracking-widest uppercase mt-0.5">WATER SPORTS LIABILITY WAIVER AGREEMENT</p>
-                            </div>
-
-                            <div 
-                              onScroll={handleWaiverScroll} 
-                              className="max-h-[224px] overflow-y-auto p-4 text-[11px] sm:text-xs text-slate-300 space-y-3.5 leading-relaxed text-left font-sans select-none scrollbar-thin scrollbar-thumb-slate-700 hover:scrollbar-thumb-slate-600"
-                            >
-                              <p className="text-slate-400 font-semibold mb-2 italic">Please read carefully and scroll to the bottom of the agreement to acknowledge:</p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I certify that I am fully aware of the risks involved in the activity and I have been briefed about the safety procedures.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I'm aware about the DO's and Don'ts, medical restrictions and local govt. regulations.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I state that I am physically fit to undertake the activity and not suffering from any heart problem, blood pressure, asthma or any other serious medical problem.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I further state that I am lawfully age and legally competent to sign this liability release agreement or that I have obtained the written consent of my parent or guardian.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I understand and agree that neither JOY WATER SPORTS or its affiliates or subsidiary corporations, nor the owners, employees, agent's contractors may be held liable or responsible in anyway for any injury, death or other damages to me.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I understand that terms herein are contractual and not mere recital and that I have signed this agreement of my own free act with the knowledge that hereby I agree to waive my legal rights.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>I expressly agree and promise to accept and assume all of the risks existing in this activity. My participation in this activity is purely voluntary, and I elect to participate in spite of the risks.</span>
-                              </p>
-                              
-                              <p className="flex items-start gap-2.5">
-                                <span className="text-sky-blue shrink-0 font-bold mt-0.5">➢</span>
-                                <span>Indemnity: I (or my representative) agree to protect and compensate the company against any costs or damages resulting from my negligence or misrepresentation.</span>
-                              </p>
-
-                              <div className="pt-4 text-center text-slate-500 font-bold text-[9px] uppercase tracking-wider border-t border-slate-800">
-                                ✓ VERIFICATION RECORD: JOY WATER SPORTS WAIVER V1.0
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Scroll Warning / Tick Option */}
-                          <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200">
-                            <label className={`flex items-start gap-3 select-none ${scrolledToBottom ? 'cursor-pointer' : 'opacity-70 cursor-not-allowed'}`}>
-                              <input 
-                                type="checkbox"
-                                disabled={!scrolledToBottom}
-                                checked={agreedToWaiver}
-                                onChange={(e) => setAgreedToWaiver(e.target.checked)}
-                                className={`w-4 h-4 text-ocean-blue border-slate-300 rounded mt-0.5 focus:ring-ocean-blue ${scrolledToBottom ? 'cursor-pointer' : 'cursor-not-allowed'}`}
-                              />
-                              <div className="text-left">
-                                <p className="font-bold text-xs sm:text-sm text-deep-blue">I have read & fully agree to the liability waiver terms</p>
-                                {!scrolledToBottom ? (
-                                  <p className="text-[10px] text-red-500 font-semibold mt-0.5">⚠️ Please scroll down the safety waiver box above to enable this checkmark.</p>
-                                ) : (
-                                  <p className="text-[10px] text-green-600 font-semibold mt-0.5">✓ Terms unlocked! Click to accept and sign.</p>
-                                )}
-                              </div>
-                            </label>
-                          </div>
-                        </div>
-
-                        {errorMessage && <p className="text-red-500 text-xs font-bold text-left">{errorMessage}</p>}
-
-                        {/* Step 2 Buttons */}
-                        <div className="flex gap-3 mt-4">
-                          <button 
-                            type="button" 
-                            onClick={() => {
-                              setBookingStep(1);
-                              setErrorMessage("");
-                            }} 
-                            className="px-5 py-3.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold text-sm transition-all flex items-center gap-1 shrink-0 cursor-pointer"
-                          >
-                            Back To Details
-                          </button>
-
-                          <button 
-                            type="submit" 
-                            disabled={status === "loading" || !agreedToWaiver} 
-                            className={`flex-1 py-3.5 text-white rounded-xl font-bold text-sm hover:shadow-md transition-all flex items-center justify-center gap-2 transform cursor-pointer ${
-                              status === "loading" || !agreedToWaiver 
-                                ? 'bg-deep-blue/60 cursor-not-allowed opacity-85' 
-                                : 'bg-gradient-to-r from-sky-blue to-deep-blue hover:shadow-sky-blue/10'
-                            }`}
-                          >
-                            {status === "loading" ? "Completing Reservation..." : <>Agree & Confirm Booking <Check size={16} /></>}
-                          </button>
-                        </div>
+                        <Send size={16} /> Submit Online Booking
                       </>
                     )}
+                  </button>
+                </div>
+              </div>
 
-                    <p className="text-center text-[10px] text-deep-blue/50 mt-3 font-semibold">Your private details are encrypted and securely stored for registration.</p>
-                  </form>
+              {errorMessage && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded-none text-red-700 text-xs font-semibold flex items-center gap-2">
+                  <AlertCircle size={15} className="shrink-0 text-red-500" />
+                  <span>{errorMessage}</span>
                 </div>
               )}
-            </div>
+            </form>
           </div>
         </div>
       </section>
@@ -1399,106 +1183,120 @@ export default function LandingPage() {
       {/* Footer */}
       <Footer />
 
-      {/* Booking Confirmation Success Modal Popup */}
-      {status === "success" && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-fade-in-backdrop">
-          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-slate-100 overflow-hidden relative p-6 sm:p-8 space-y-5 flex flex-col text-center">
-            <button
+      {/* Popup Confirmation Modal on Form Submit */}
+      {showContactPopup && (
+        <div 
+          className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in"
+          onClick={() => {
+            setShowContactPopup(false);
+            setEnquiryMessage('');
+          }}
+        >
+          <div 
+            className="w-full max-w-[420px] bg-white rounded-[24px] shadow-2xl overflow-hidden relative border border-slate-100 font-sans p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Close Button */}
+            <button 
               type="button"
-              onClick={() => setStatus("idle")}
-              className="absolute top-5 right-5 text-slate-400 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 p-2 rounded-full transition-colors cursor-pointer z-10"
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors cursor-pointer" 
+              aria-label="Close"
+              onClick={() => {
+                setShowContactPopup(false);
+                setEnquiryMessage('');
+              }}
             >
-              <X size={18} />
+              ✕
             </button>
 
-            {/* Glowing Success Badge */}
-            <div className="mx-auto w-16 h-16 bg-emerald-500 text-white rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30">
-              <Check size={32} strokeWidth={3} />
-            </div>
-
-            <div>
-              <h3 className="text-2xl font-black text-slate-900 tracking-tight font-display">
-                Booking Confirmed! 🎉
-              </h3>
-              <p className="text-emerald-600 font-bold text-sm mt-1">
-                Your water sports slot has been reserved successfully.
+            {/* Header Section */}
+            <div className="text-center pt-2 pb-4">
+              <div className="w-12 h-12 mx-auto mb-3 bg-amber-100 rounded-full flex items-center justify-center text-amber-600">
+                <FileText size={26} />
+              </div>
+              <p className="text-[11px] tracking-widest uppercase text-sky-600 font-bold mb-1">Reservation Received</p>
+              <h1 className="text-xl font-bold text-slate-900 mb-1">Declaration Form Required</h1>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                To confirm your booking and generate your ticket pass, please complete the Liability Declaration Form.
               </p>
             </div>
 
-            {/* Booking Details Card */}
-            {lastConfirmedBooking && (
-              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left space-y-2 text-xs">
-                <div className="flex justify-between border-b border-slate-200/80 pb-2">
-                  <span className="text-slate-500 font-medium">Booking ID</span>
-                  <span className="font-extrabold text-[#004E98] font-mono text-sm">{lastConfirmedBooking.bookingId}</span>
+            {/* Banner Alert */}
+            <div className="mb-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-left space-y-1">
+              <div className="flex items-center gap-2 text-amber-900 font-bold text-xs">
+                <AlertCircle size={16} className="shrink-0 text-amber-600" />
+                <span>Action Required: Fill Declaration</span>
+              </div>
+              <p className="text-[11.5px] text-amber-800 leading-snug">
+                Your online booking is currently <strong className="underline">PENDING DECLARATION</strong>. Complete the declaration form now using the navbar or button below.
+              </p>
+            </div>
+
+            {/* Booking Reference Box */}
+            {submittedEnquiry && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-5 space-y-1.5 text-xs text-slate-700">
+                <div className="flex justify-between font-mono">
+                  <span className="text-slate-500">Booking Reference:</span>
+                  <strong className="text-sky-600 font-bold">{submittedEnquiry.bookingId}</strong>
                 </div>
-                <div className="flex justify-between border-b border-slate-200/80 pb-2">
-                  <span className="text-slate-500 font-medium">Guest Name</span>
-                  <span className="font-bold text-slate-900">{lastConfirmedBooking.firstName} {lastConfirmedBooking.lastName}</span>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Name:</span>
+                  <span className="font-semibold text-slate-900">{submittedEnquiry.firstName} {submittedEnquiry.lastName}</span>
                 </div>
-                <div className="flex justify-between border-b border-slate-200/80 pb-2">
-                  <span className="text-slate-500 font-medium">Date &amp; Time</span>
-                  <span className="font-bold text-slate-900">{lastConfirmedBooking.date} ({formatTime(lastConfirmedBooking.time)})</span>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Date &amp; Time:</span>
+                  <span className="font-semibold text-slate-900">{submittedEnquiry.date}, {submittedEnquiry.time}</span>
                 </div>
-                <div className="flex justify-between border-b border-slate-200/80 pb-2">
-                  <span className="text-slate-500 font-medium">Activities ({lastConfirmedBooking.guests} Guest{lastConfirmedBooking.guests > 1 ? 's' : ''})</span>
-                  <span className="font-bold text-slate-900 text-right max-w-[200px] truncate">{lastConfirmedBooking.activities?.join(', ')}</span>
-                </div>
-                <div className="flex justify-between pt-1">
-                  <span className="text-slate-500 font-medium">Total Amount</span>
-                  <span className="font-black text-[#004E98] text-sm">₹{lastConfirmedBooking.totalAmount?.toLocaleString('en-IN')}</span>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Guests:</span>
+                  <span className="font-semibold text-slate-900">{submittedEnquiry.guests} Person(s)</span>
                 </div>
               </div>
             )}
 
-            <p className="text-slate-500 text-xs leading-relaxed">
-              Our team will review your booking details and contact you shortly. You can also view your live ticket &amp; boarding pass.
-            </p>
+            {/* CTA Buttons */}
+            <div className="space-y-2.5">
+              {submittedEnquiry && (
+                <Link
+                  to={`/declaration?bookingId=${submittedEnquiry.bookingId}&name=${encodeURIComponent((submittedEnquiry.firstName + ' ' + submittedEnquiry.lastName).trim())}&phone=${encodeURIComponent(submittedEnquiry.phone)}&guests=${submittedEnquiry.guests}&date=${submittedEnquiry.date}`}
+                  onClick={() => setShowContactPopup(false)}
+                  className="w-full py-3 px-4 bg-gradient-to-r from-sky-blue to-deep-blue hover:from-sky-blue hover:to-ocean-blue text-white font-bold text-xs sm:text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer"
+                >
+                  <FileText size={16} />
+                  <span>Fill Declaration Form Now</span>
+                  <ArrowRight size={16} />
+                </Link>
+              )}
 
-            {/* Action Buttons */}
-            <div className="flex flex-col sm:flex-row gap-3 pt-2">
-              {lastConfirmedBooking?.whatsappUrl && (
+              {submittedEnquiry?.whatsappUrl && (
                 <a
-                  href={lastConfirmedBooking.whatsappUrl}
+                  href={submittedEnquiry.whatsappUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-2.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs rounded-xl border border-emerald-200 flex items-center justify-center gap-2 transition-all cursor-pointer"
                 >
-                  <span>WhatsApp Confirmation</span> <ExternalLink size={14} />
+                  <span>Chat on WhatsApp</span>
                 </a>
               )}
-              <button
+
+              <button 
                 type="button"
+                className="w-full py-2 text-slate-400 hover:text-slate-600 text-xs font-semibold cursor-pointer transition-colors"
                 onClick={() => {
-                  const refId = lastConfirmedBooking?.bookingId || lastConfirmedBooking?.phone || '';
-                  setStatus("idle");
-                  handleOpenAccountModal(refId);
+                  setShowContactPopup(false);
+                  setEnquiryMessage('');
                 }}
-                className="flex-1 py-3 bg-[#004E98] hover:bg-[#003B73] text-white rounded-2xl font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <Ticket size={14} /> View My Ticket
+                Close &amp; Complete Later
               </button>
             </div>
-
-            <button
-              type="button"
-              onClick={() => setStatus("idle")}
-              className="text-xs font-semibold text-slate-400 hover:text-slate-600 transition-colors pt-1 cursor-pointer"
-            >
-              Done &amp; Close
-            </button>
           </div>
         </div>
       )}
 
-      {/* Login / Registration Modal with backdrop blur */}
-      {isLoginOpen && (
-        <UserLogin 
-          isModal={true}
-          onSuccess={handleLoginSuccess}
-          onCancel={() => setIsLoginOpen(false)}
-        />
-      )}
+
+
+
 
       {/* Customer Account & Ticket Status Modal */}
       {isLookupOpen && (
@@ -1523,33 +1321,7 @@ export default function LandingPage() {
               </div>
             </div>
 
-            {/* Account Info Bar (if logged in) */}
-            {isLoggedIn && (
-              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 flex items-center justify-between gap-3 shrink-0">
-                <div className="flex items-center gap-2.5 overflow-hidden">
-                  <div className="w-8 h-8 rounded-full bg-[#004E98] text-white flex items-center justify-center font-bold text-xs shrink-0">
-                    {userName ? userName.charAt(0).toUpperCase() : 'U'}
-                  </div>
-                  <div className="overflow-hidden">
-                    <p className="text-xs font-bold text-slate-900 truncate">{userName}</p>
-                    <p className="text-[10px] text-slate-500 truncate">{userEmail}</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const savedPhone = localStorage.getItem('userPhone') || formData.phone || userEmail;
-                    if (savedPhone) {
-                      setLookupInput(savedPhone);
-                      executeLookupSearch(savedPhone);
-                    }
-                  }}
-                  className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl text-[11px] font-bold text-[#004E98] transition-all shrink-0 cursor-pointer shadow-2xs"
-                >
-                  Auto-load My Bookings
-                </button>
-              </div>
-            )}
+
 
             {/* Search Input Bar */}
             <form onSubmit={handleLookupSubmit} className="space-y-2 shrink-0">
